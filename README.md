@@ -223,3 +223,7 @@ wp-mcp-abilities/
 | **v5.2** | `wp-mcp-abilities.php` | + `site/upload-media` (base64 ou URL distante — garde-fous : taille max du site, mimes autorisés) et `site/delete-media` (garde-fou : l'ID doit être un média) |
 | **v5.2.1** | `wp-mcp-abilities.php` | Fix anti-collision : garde `wp_has_ability_category()` avant l'enregistrement de la catégorie + anti double-chargement du fichier (constante `WMA_VERSION`) |
 | **v5.3** | `wp-mcp-abilities.php` | **Champs personnalisés ACF** : lecture (`fields` dans get-post, inventaires `acf_fields`, `include_fields` sur list-terms) et écriture (`fields` sur create/update-post et create/update-term, liste blanche stricte) |
+
+## Licence
+
+Distribué sous licence **GPL-2.0-or-later** — voir [LICENSE](LICENSE).

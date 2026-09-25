@@ -4,6 +4,8 @@
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
  * Version:     5.3.1
  * Author:      krikrak
+ * License:     GPL-2.0-or-later
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Requires PHP: 7.4
  * Requires WP:  6.9 (Abilities API native)
  *
