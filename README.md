@@ -92,6 +92,7 @@ Hérités de l'incident v3 (un agent avait supprimé des contenus du mauvais typ
 - `site/delete-term` refuse la suppression d'un terme encore assigné à des contenus (`force=true` pour forcer).
 - `site/delete-media` refuse tout ID qui n'est pas un média (`attachment`) : impossible de supprimer un contenu via l'outil média.
 - Écriture des champs ACF : liste blanche stricte — seuls les champs déclarés pour le type/la taxonomie sont acceptés, validation avant toute écriture.
+- Lectures **status-aware** : un contenu non publié n'est lisible que par qui peut l'éditer ; les statuts ≠ `publish` exigent `edit_posts`.
 - Publication directe refusée sans la capability dédiée au type (`publish_posts`) ; création en `draft` par défaut.
 - `parent_id` uniquement pour les types **hiérarchiques** (parent de même type requis) ; `menu_order` ignoré sur les types non concernés.
 - Les types **sans éditeur** (supports sans `editor`) stockent automatiquement le paramètre `content` dans l'extrait.
@@ -113,6 +114,12 @@ Toutes les abilities exigent un utilisateur **connecté** + la capability adapt�
 
 L'exposition MCP (`meta.mcp.public = true`) ne contourne aucune permission : chaque exécution repasse par le `permission_callback`.
 
+Lectures **status-aware** : un contenu non publié (brouillon, privé, pending) n'est lisible que par un compte capable de l'éditer — `get-post` exige `edit_post` sur le contenu ciblé, et `get-recent-posts` exige `edit_posts` pour tout statut ≠ `publish`.
+
+Import média par URL : schémas http(s) uniquement, hôte **public** requis (plages privées/boucle locale/réservées refusées avant tout téléchargement) — désactivable via le filtre `wma_allow_url_sideload`. La garde couvre une résolution DNS (pas le DNS rebinding) : pour un cloisonnement strict, désactiver le sideload.
+
+Anonyme : le serveur MCP répond **401 dès le handshake** (`initialize` inclus) — aucune découverte ni exécution sans authentification WordPress (vérifié sur site réel).
+
 ## Filtres (optionnels)
 
 Sans toucher au fichier, un petit snippet `mu-plugin` peut ajuster un site particulier :
@@ -123,6 +130,7 @@ Sans toucher au fichier, un petit snippet `mu-plugin` peut ajuster un site parti
 | `wma_post_types` | Restreindre/étendre les types de contenus exposés | tous les post types publics avec UI |
 | `wma_taxonomies` | Restreindre/étendre les taxonomies exposées | toutes les taxonomies publiques avec UI |
 | `wma_types_description` | Remplacer le texte de contexte des agents | auto-généré depuis labels + descriptions |
+| `wma_allow_url_sideload` | Désactiver l'import média par URL distante (anti-SSRF strict) | `true` |
 
 ```php
 // Ex. masquer le type « post » sur un site de documentation :
@@ -211,7 +219,7 @@ grep -rn "wp-mcp-abilities" wp-content/ --include="*.php" \
 wp-mcp-abilities/
 ├── .gitignore                 ← exclut les références locales
 ├── README.md                 ← ce fichier
-└── wp-mcp-abilities.php      ← connecteur générique v5.3 (à déployer)
+└── wp-mcp-abilities.php      ← connecteur générique v5.4 (à déployer)
 ```
 
 ## Historique
@@ -223,6 +231,7 @@ wp-mcp-abilities/
 | **v5.2** | `wp-mcp-abilities.php` | + `site/upload-media` (base64 ou URL distante — garde-fous : taille max du site, mimes autorisés) et `site/delete-media` (garde-fou : l'ID doit être un média) |
 | **v5.2.1** | `wp-mcp-abilities.php` | Fix anti-collision : garde `wp_has_ability_category()` avant l'enregistrement de la catégorie + anti double-chargement du fichier (constante `WMA_VERSION`) |
 | **v5.3** | `wp-mcp-abilities.php` | **Champs personnalisés ACF** : lecture (`fields` dans get-post, inventaires `acf_fields`, `include_fields` sur list-terms) et écriture (`fields` sur create/update-post et create/update-term, liste blanche stricte) |
+| **v5.4** | `wp-mcp-abilities.php` | **Durcissement sécurité** : lectures status-aware (les non-publiés ne sont lisibles que par qui peut les éditer), garde anti-SSRF sur l'import média par URL (http(s), hôte public) + filtre `wma_allow_url_sideload` |
 
 ## Licence
 

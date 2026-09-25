@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.3.1
+ * Version:     5.4.0
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -59,6 +59,7 @@
  *  - wma_post_types         → liste des post types autorisés.
  *  - wma_taxonomies         → liste des taxonomies autorisées.
  *  - wma_types_description  → texte de contexte pour les agents.
+ *  - wma_allow_url_sideload → autoriser (défaut) ou refuser l'import média par URL distante.
  *
  * CHAMPS PERSONNALISÉS (ACF) — support conditionnel (rien si ACF est inactif) :
  *  - lecture  : site/get-post renvoie « fields » (valeurs ACF du contenu) ;
@@ -82,6 +83,12 @@
  *  - site/delete-media refuse tout ID qui n'est pas un média (« attachment ») ;
  *  - écriture des champs ACF limitée aux champs déclarés pour le type/la
  *    taxonomie (liste blanche stricte) ;
+ *  - lectures status-aware : un contenu non publié n'est lisible que par qui
+ *    peut l'éditer (get-post), et les statuts ≠ « publish » exigent edit_posts
+ *    (get-recent-posts) ;
+ *  - upload-media en mode URL : schémas http(s) uniquement, hôte public requis
+ *    (plages privées/réservées refusées avant téléchargement), désactivable via
+ *    wma_allow_url_sideload ;
  *  - publication directe refusée sans la capability dédiée au type (draft par défaut) ;
  *  - site/create-post & update-post : parent_id uniquement pour les types
  *    hiérarchiques (même type requis) ; les types SANS éditeur (supports sans
@@ -101,6 +108,10 @@
  *                  create/update-post et create/update-term, liste blanche stricte).
  *  - v5.3.1      : nettoyage pour publication publique — suppression des références
  *                  aux sites historiques, version constante WMA_VERSION corrigée.
+ *  - v5.4        : durcissement sécurité — lectures status-aware (get-post exige edit_post
+ *                  sur les non-publiés, get-recent-posts exige edit_posts pour les statuts
+ *                  ≠ publish), garde anti-SSRF élémentaire sur upload-media en mode URL
+ *                  (http(s) uniquement, hôte public) + filtre wma_allow_url_sideload.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -108,7 +119,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.3.1' );
+define( 'WMA_VERSION', '5.4.0' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -494,6 +505,65 @@ function wma_post_schema( bool $with_content = false, bool $with_fields = false 
 }
 
 /**
+ * Garde anti-SSRF élémentaire pour l'import média par URL distante :
+ * schémas http(s) uniquement et hôte public requis (les adresses
+ * privées, de boucle locale ou réservées sont refusées AVANT tout
+ * téléchargement).
+ *
+ * NOTE : une seule résolution DNS est faite ici ; download_url() résoudra
+ * à nouveau — la protection ne couvre pas le DNS rebinding. Pour un
+ * cloisonnement strict, désactiver le sideload via le filtre
+ * wma_allow_url_sideload.
+ *
+ * @param string $url URL distante proposée.
+ * @return true|WP_Error
+ */
+function wma_check_remote_host( string $url ) {
+	$scheme = (string) wp_parse_url( $url, PHP_URL_SCHEME );
+	if ( ! in_array( $scheme, array( 'http', 'https' ), true ) ) {
+		return new WP_Error(
+			'wma_invalid_scheme',
+			sprintf( 'Only http(s) URLs are allowed for remote imports (got "%s").', $scheme )
+		);
+	}
+
+	$host = (string) wp_parse_url( $url, PHP_URL_HOST );
+	if ( '' === $host ) {
+		return new WP_Error(
+			'wma_invalid_url',
+			'The "url" parameter is not a valid URL.'
+		);
+	}
+
+	$ip = filter_var( $host, FILTER_VALIDATE_IP ) ? $host : gethostbyname( $host );
+
+	if ( ! filter_var( $ip, FILTER_VALIDATE_IP ) ) {
+		return new WP_Error(
+			'wma_invalid_host',
+			sprintf( 'Could not resolve the host "%s" to a valid address.', $host )
+		);
+	}
+
+	$flags = ( false === strpos( $ip, ':' ) )
+		? ( FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE )
+		: ( FILTER_FLAG_IPV6 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE );
+
+	if ( ! filter_var( $ip, FILTER_VALIDATE_IP, $flags ) ) {
+		return new WP_Error(
+			'wma_private_host',
+			sprintf(
+				'The host "%1$s" resolves to a private or reserved address (%2$s) — remote imports must target public hosts.',
+				$host,
+				$ip
+			)
+		);
+	}
+
+	return true;
+}
+
+
+/**
  * Réponse standardisée d'une ability média : élément de médiathèque formaté
  * (utilisé par site/upload-media).
  *
@@ -633,7 +703,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/get-recent-posts',
 		array(
 			'label'               => 'Get Recent Posts',
-			'description'         => 'Retrieve the most recent content of a given type, newest first. Each result carries "type" and "type_label" identifying its content type. ' . wma_types_description(),
+			'description'         => 'Retrieve the most recent content of a given type, newest first. Each result carries "type" and "type_label" identifying its content type. Unpublished statuses (draft, private, any) require the edit_posts capability. ' . wma_types_description(),
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -655,7 +725,7 @@ add_action( 'wp_abilities_api_init', static function () {
 						'type'        => 'string',
 						'enum'        => array( 'publish', 'draft', 'private', 'any' ),
 						'default'     => 'publish',
-						'description' => 'Status filter (default "publish").',
+						'description' => 'Status filter (default "publish"). Unpublished statuses require the edit_posts capability.',
 					),
 				),
 			),
@@ -735,7 +805,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/get-post',
 		array(
 			'label'               => 'Get Post',
-			'description'         => 'Retrieve a single content item with its full content, by numeric ID or slug. The result carries "type" and "type_label" identifying its content type — check them before updating or deleting. When ACF is active, the result also carries a "fields" object with the custom field values of the content.',
+			'description'         => 'Retrieve a single content item with its full content, by numeric ID or slug. The result carries "type" and "type_label" identifying its content type — check them before updating or deleting. When ACF is active, the result also carries a "fields" object with the custom field values of the content. Unpublished content (draft, private…) is only readable with edit permission on it.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1062,7 +1132,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/upload-media',
 		array(
 			'label'               => 'Upload Media',
-			'description'         => 'Upload a media file into the media library. Provide either "data" (base64-encoded file content, with "filename") or "url" (remote file the site downloads itself — PREFER this for large files, MCP payloads have size limits). The file type must be allowed by the site. Optional title, alt_text, caption and description are set at upload time. Returns the created media item with its ID and URL.',
+			'description'         => 'Upload a media file into the media library. Provide either "data" (base64-encoded file content, with "filename") or "url" (remote file the site downloads itself — PREFER this for large files, MCP payloads have size limits). The file type must be allowed by the site. Optional title, alt_text, caption and description are set at upload time. Returns the created media item with its ID and URL. URL imports are http(s)-only, must target a public host (private/reserved IP ranges are refused) and can be disabled via the wma_allow_url_sideload filter.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1077,7 +1147,7 @@ add_action( 'wp_abilities_api_init', static function () {
 					),
 					'url'         => array(
 						'type'        => 'string',
-						'description' => 'Remote URL of the file to import (server-side download). Provide either "url" or "data".',
+						'description' => 'Remote URL of the file to import (server-side download — http(s) only, public host required). Provide either "url" or "data".',
 					),
 					'title'       => array(
 						'type'        => 'string',
@@ -1626,12 +1696,22 @@ function wma_exec_list_post_types( $input = array() ): array {
  * @param array $input {numberposts?, post_type?, post_status?}.
  * @return array
  */
-function wma_exec_get_recent_posts( $input = array() ): array {
+function wma_exec_get_recent_posts( $input = array() ) {
+	$post_status = $input['post_status'] ?? 'publish';
+
+	// Garde-fou : les statuts autres que « publish » exigent edit_posts.
+	if ( 'publish' !== $post_status && ! current_user_can( 'edit_posts' ) ) {
+		return new WP_Error(
+			'wma_status_forbidden',
+			'Listing unpublished content requires the edit_posts capability.'
+		);
+	}
+
 	$posts = get_posts(
 		array(
 			'numberposts' => min( 50, max( 1, (int) ( $input['numberposts'] ?? 10 ) ) ),
 			'post_type'   => $input['post_type'] ?? wma_default_post_type(),
-			'post_status' => $input['post_status'] ?? 'publish',
+			'post_status' => $post_status,
 			'orderby'     => 'date',
 			'order'       => 'DESC',
 		)
@@ -1693,6 +1773,14 @@ function wma_exec_get_post( $input = array() ) {
 		return new WP_Error(
 			'wma_post_not_found',
 			'Post not found: provide a valid "post_id" or "slug".'
+		);
+	}
+
+	// Garde-fou : un contenu non publié n'est lisible que par qui peut l'éditer.
+	if ( 'publish' !== $post->post_status && ! current_user_can( 'edit_post', $post->ID ) ) {
+		return new WP_Error(
+			'wma_post_forbidden',
+			'You are not allowed to read unpublished content (status: ' . $post->post_status . ').'
 		);
 	}
 
@@ -2143,6 +2231,18 @@ function wma_exec_upload_media( $input = array() ) {
 		wp_update_attachment_metadata( $attach_id, wp_generate_attachment_metadata( $attach_id, $upload['file'] ) );
 	} else {
 		// Mode URL : le site télécharge le fichier lui-même (sideload).
+		if ( ! apply_filters( 'wma_allow_url_sideload', true ) ) {
+			return new WP_Error(
+				'wma_sideload_disabled',
+				'Remote URL imports are disabled on this site.'
+			);
+		}
+
+		$host_check = wma_check_remote_host( $url );
+		if ( is_wp_error( $host_check ) ) {
+			return $host_check;
+		}
+
 		$tmp = download_url( $url );
 
 		if ( is_wp_error( $tmp ) ) {
