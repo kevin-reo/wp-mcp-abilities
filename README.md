@@ -173,15 +173,42 @@ Spécificités des mu-plugins :
 
 Le fichier est **identique sur tous les sites** : la découverte automatique s'adapte aux contenus réels de chacun.
 
-### 3. Brancher un client MCP
+### 3. Créer la clé d'authentification (mot de passe d'application)
+
+WordPress n'accepte les **mots de passe d'application** qu'en authentification **HTTP Basic** — jamais en `Bearer`. C'est la cause n° 1 d'échec de connexion (« Authentication failed ») avec n8n ou d'autres clients MCP qui proposent « Bearer auth » par défaut.
+
+#### a. Créer la clé dans WordPress
+
+Dans l'admin : `Utilisateurs → Profil` → section **Mots de passe d'application** → nommer la clé (ex. « n8n ») → **Ajouter une nouvelle clé**. WordPress affiche la clé **une seule fois** : 24 caractères groupés par 4, **espaces inclus** (format `xxxx xxxx xxxx xxxx xxxx xxxx`). Copier la clé **complète, espaces compris**.
+
+#### b. Calculer l'en-tête HTTP Basic
+
+Concaténer l'identifiant du compte et la clé avec un deux-points (`identifiant:clé`), puis encoder en base64 :
+
+```bash
+printf 'identifiant:mot-de-passe-application' | base64 -w0; echo
+```
+
+La chaîne obtenue est la **valeur** de l'en-tête. Pour un client qui ne gère pas l'auth Basic nativement (n8n…), on l'utilise via une credential **Header Auth** :
 
 | Réglage | Valeur |
 |---|---|
-| Transport | HTTP |
+| Transport | **Streamable HTTP** (un `GET` simple renvoie 405 : le serveur n'accepte que le POST JSON-RPC) |
 | URL | `https://{domaine}/wp-json/mcp/mcp-adapter-default-server` |
-| Authentification | compte WordPress — **mot de passe d'application** recommandé (`Utilisateurs → Profil → Mots de passe d'application`) |
+| Credential | **Header Auth** (pas « Bearer auth ») |
+| Header | `Authorization` |
+| Value | `Basic <sortie du base64 ci-dessus>` — préfixe « Basic » + espace obligatoires |
 
-Le client voit trois **méta-tools** : `mcp-adapter/discover-abilities` (liste), `mcp-adapter/get-ability-info` (détail), `mcp-adapter/execute-ability` (exécution).
+#### c. Vérifier la clé avant de brancher le client
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -u "identifiant:mot-de-passe-application" \
+  "https://{domaine}/wp-json/wp/v2/users/me"    # 200 = clé valide ; 401 = clé ou format invalide
+```
+
+Une fois branché, le client voit trois **méta-tools** : `mcp-adapter/discover-abilities` (liste), `mcp-adapter/get-ability-info` (détail), `mcp-adapter/execute-ability` (exécution). C'est le fonctionnement normal du mcp-adapter : les 16 abilities `site/…` s'utilisent **via ces méta-tools**, pas comme des tools séparés — une liste de 3 tools côté client est donc le comportement attendu.
+
+> **Hygiène de la clé** : si elle a été collée en clair quelque part (ticket, chat…), la **révoquer** et en générer une nouvelle (`Utilisateurs → Profil → Mots de passe d'application`), puis refaire la credential du client avec la même méthode.
 
 ### 4. Vérifier l'installation
 
@@ -212,6 +239,16 @@ grep -rn "wp-mcp-abilities" wp-content/ --include="*.php" \
 ```
 
 > Si un autre composant déclare `site` **après** le connecteur (les mu-plugins chargent en premier), c'est lui qui déclenche la notice : corriger côté coupable, ou renommer notre catégorie via `add_filter( 'wma_category', fn() => 'wma-content' );`.
+
+### n8n : « Could not connect to your MCP server. Authentication failed. »
+
+Presque toujours un problème d'authentification, dans cet ordre :
+
+1. **Authentification Bearer utilisée** → WordPress n'accepte que l'auth **Basic** pour les mots de passe d'application : basculer sur une credential **Header Auth** avec `Authorization: Basic <base64 identifiant:clé>` (cf. [Créer la clé d'authentification](#3-créer-la-clé-dauthentification-mot-de-passe-dapplication)).
+2. **Clé incomplète ou altérée** → les espaces de la clé font partie du secret : copier les 24 caractères tels qu'affichés, ou régénérer la clé.
+3. **Transport SSE** au lieu de **Streamable HTTP** → le serveur par défaut du mcp-adapter n'accepte que le POST JSON-RPC.
+
+Contrôle indépendant du client avec curl (attendu : `200`) : `curl -u "identifiant:clé" https://{domaine}/wp-json/wp/v2/users/me`.
 
 ## Arborescence
 
