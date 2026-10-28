@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.4.0
+ * Version:     5.4.1
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -112,6 +112,11 @@
  *                  sur les non-publiés, get-recent-posts exige edit_posts pour les statuts
  *                  ≠ publish), garde anti-SSRF élémentaire sur upload-media en mode URL
  *                  (http(s) uniquement, hôte public) + filtre wma_allow_url_sideload.
+ *  - v5.4.1      : kses conditionnel — wp_kses_post() n'est plus appliqué aux contenus
+ *                  (create/update-post) ni aux descriptions de termes (create/update-term)
+ *                  des comptes disposant de « unfiltered_html » (comportement du cœur) :
+ *                  un admin écrivant via MCP ne perd plus le markup hors liste blanche
+ *                  kses (SVG inline des blocs wp:html, iframes…).
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -119,7 +124,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.4.0' );
+define( 'WMA_VERSION', '5.4.1' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -502,6 +507,23 @@ function wma_post_schema( bool $with_content = false, bool $with_fields = false 
 		'properties' => $properties,
 		'required'   => array( 'id', 'title', 'type', 'type_label', 'link' ),
 	);
+}
+
+/**
+ * Sanitisation HTML alignée sur le cœur de WordPress : wp_kses_post()
+ * n'est appliqué QUE si le compte courant ne dispose pas de la capability
+ * « unfiltered_html » — comportement natif de l'éditeur d'admin. Sans cette
+ * garde, un admin écrivant via MCP perdrait tout markup absent de la liste
+ * blanche kses (SVG inline des blocs wp:html, iframes…).
+ *
+ * @param string $content Contenu HTML brut.
+ * @return string Contenu filtré, ou brut si unfiltered_html.
+ */
+function wma_kses_content( string $content ): string {
+	if ( ! current_user_can( 'unfiltered_html' ) ) {
+		return wp_kses_post( $content );
+	}
+	return $content;
 }
 
 /**
@@ -1833,7 +1855,7 @@ function wma_exec_create_post( $input = array() ) {
 
 	$postarr = array(
 		'post_title'   => sanitize_text_field( (string) ( $input['title'] ?? '' ) ),
-		'post_content' => $supports_editor ? wp_kses_post( (string) ( $input['content'] ?? '' ) ) : '',
+		'post_content' => $supports_editor ? wma_kses_content( (string) ( $input['content'] ?? '' ) ) : '',
 		'post_status'  => $status,
 		'post_type'    => $type,
 	);
@@ -1924,7 +1946,7 @@ function wma_exec_update_post( $input = array() ) {
 		$postarr['post_title'] = sanitize_text_field( (string) $input['title'] );
 	}
 	if ( array_key_exists( 'content', (array) $input ) ) {
-		$postarr['post_content'] = wp_kses_post( (string) $input['content'] );
+		$postarr['post_content'] = wma_kses_content( (string) $input['content'] );
 	}
 	if ( ! empty( $input['status'] ) ) {
 		$new_status = (string) $input['status'];
@@ -2565,7 +2587,7 @@ function wma_exec_create_term( $input = array() ) {
 		$args['slug'] = sanitize_title( (string) $input['slug'] );
 	}
 	if ( array_key_exists( 'description', (array) $input ) ) {
-		$args['description'] = wp_kses_post( (string) $input['description'] );
+		$args['description'] = wma_kses_content( (string) $input['description'] );
 	}
 	if ( ! empty( $input['parent'] ) ) {
 		$parent_id = absint( $input['parent'] );
@@ -2665,7 +2687,7 @@ function wma_exec_update_term( $input = array() ) {
 		$args['slug'] = sanitize_title( (string) $input['slug'] );
 	}
 	if ( array_key_exists( 'description', (array) $input ) ) {
-		$args['description'] = wp_kses_post( (string) $input['description'] );
+		$args['description'] = wma_kses_content( (string) $input['description'] );
 	}
 	if ( array_key_exists( 'parent', (array) $input ) ) {
 		$parent_id = absint( $input['parent'] );

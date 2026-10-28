@@ -120,6 +120,8 @@ Import média par URL : schémas http(s) uniquement, hôte **public** requis (pl
 
 Anonyme : le serveur MCP répond **401 dès le handshake** (`initialize` inclus) — aucune découverte ni exécution sans authentification WordPress (vérifié sur site réel).
 
+Filtrage kses aligné sur le cœur : `wp_kses_post()` n'est appliqué aux contenus (`site/create-post` / `site/update-post`) et aux descriptions de termes (`site/create-term` / `site/update-term`) **que pour les comptes sans** la capability `unfiltered_html`. Les admins conservent via MCP le même périmètre de balisage que depuis l'éditeur d'admin (SVG inline des blocs `wp:html`, iframes…).
+
 ## Filtres (optionnels)
 
 Sans toucher au fichier, un petit snippet `mu-plugin` peut ajuster un site particulier :
@@ -269,6 +271,7 @@ wp-mcp-abilities/
 | **v5.2.1** | `wp-mcp-abilities.php` | Fix anti-collision : garde `wp_has_ability_category()` avant l'enregistrement de la catégorie + anti double-chargement du fichier (constante `WMA_VERSION`) |
 | **v5.3** | `wp-mcp-abilities.php` | **Champs personnalisés ACF** : lecture (`fields` dans get-post, inventaires `acf_fields`, `include_fields` sur list-terms) et écriture (`fields` sur create/update-post et create/update-term, liste blanche stricte) |
 | **v5.4** | `wp-mcp-abilities.php` | **Durcissement sécurité** : lectures status-aware (les non-publiés ne sont lisibles que par qui peut les éditer), garde anti-SSRF sur l'import média par URL (http(s), hôte public) + filtre `wma_allow_url_sideload` |
+| **v5.4.1** | `wp-mcp-abilities.php` | **Fix kses conditionnel** : `wp_kses_post()` n'est plus appliqué aux contenus (`create-post` / `update-post`) ni aux descriptions de termes (`create-term` / `update-term`) des comptes disposant de `unfiltered_html` (comportement du cœur) — un admin écrivant via MCP ne perd plus le markup hors liste blanche kses (SVG inline des blocs `wp:html`, iframes…) |
 
 ## Licence
 
