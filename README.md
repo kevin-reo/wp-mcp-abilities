@@ -284,6 +284,7 @@ wp-mcp-abilities/
 | **v5.4** | `wp-mcp-abilities.php` | **Durcissement sécurité** : lectures status-aware (les non-publiés ne sont lisibles que par qui peut les éditer), garde anti-SSRF sur l'import média par URL (http(s), hôte public) + filtre `wma_allow_url_sideload` |
 | **v5.4.1** | `wp-mcp-abilities.php` | **Fix kses conditionnel** : `wp_kses_post()` n'est plus appliqué aux contenus (`create-post` / `update-post`) ni aux descriptions de termes (`create-term` / `update-term`) des comptes disposant de `unfiltered_html` (comportement du cœur) — un admin écrivant via MCP ne perd plus le markup hors liste blanche kses (SVG inline des blocs `wp:html`, iframes…) |
 | **v5.5.0** | `wp-mcp-abilities.php` | **Support Polylang (optionnel)** : `lang` (code langue, validé contre `pll_languages_list()` avant écriture) et `translations` (groupe complet langue => ID) sur `create-post` / `update-post`, via `pll_set_post_language()` et `pll_save_post_translations()` ; réponses enrichies (`lang`, `translations`) |
+| **v5.5.1** | `wp-mcp-abilities.php` | **Paramètre `date`** : date de publication sur `create-post` / `update-post` (ISO 8601 ou `YYYY-MM-DD HH:MM:SS` à l'heure du site) — `post_date` + `post_date_gmt`, validée avant écriture, dates du futur refusées ; réponses enrichies (`date`) |
 
 ## Licence
 
