@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.5.0
+ * Version:     5.5.1
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -124,6 +124,10 @@
  *                  pll_save_post_translations(), code langage validé contre
  *                  pll_languages_list(); réponse enrichie de « lang » et
  *                  « translations » (langue effective et groupe courant).
+ *  - v5.5.1      : paramètre « date » (date de publication) sur create/update-post :
+ *                  ISO 8601 ou « YYYY-MM-DD HH:MM:SS » (heure du site), convertie en
+ *                  post_date + post_date_gmt, dates du futur refusées (pas de
+ *                  programmation via ce paramètre). Réponse enrichie de « date ».
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -131,7 +135,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.5.0' );
+define( 'WMA_VERSION', '5.5.1' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -531,6 +535,49 @@ function wma_kses_content( string $content ): string {
 		return wp_kses_post( $content );
 	}
 	return $content;
+}
+
+/**
+ * Analyse la date de publication fournie par un agent.
+ *
+ * Accepte ISO 8601 (avec décalage explicite, ex. « 2023-02-01T14:47:41+01:00 »)
+ * ou « YYYY-MM-DD HH:MM:SS » interprété dans l'heure du site. Les dates du
+ * futur sont refusées : pas de programmation via ce paramètre.
+ *
+ * @param string $raw Valeur brute du paramètre « date ».
+ * @return array{date:string,date_gmt:string}|WP_Error
+ */
+function wma_parse_date( string $raw ) {
+	$raw = trim( $raw );
+	if ( '' === $raw ) {
+		return new WP_Error(
+			'wma_invalid_date',
+			'The "date" parameter is empty.'
+		);
+	}
+
+	try {
+		$dt = new DateTimeImmutable( $raw, wp_timezone() );
+	} catch ( Exception $e ) {
+		return new WP_Error(
+			'wma_invalid_date',
+			'The "date" parameter could not be parsed. Use ISO 8601 (e.g. "2023-02-01T14:47:41+01:00") or "YYYY-MM-DD HH:MM:SS" in the site timezone.'
+		);
+	}
+
+	if ( $dt > new DateTimeImmutable( 'now', wp_timezone() ) ) {
+		return new WP_Error(
+			'wma_future_date',
+			'Future dates are not allowed with the "date" parameter (no scheduling).'
+		);
+	}
+
+	$gmt = $dt->setTimezone( new DateTimeZone( 'UTC' ) );
+
+	return array(
+		'date'     => $dt->format( 'Y-m-d H:i:s' ),
+		'date_gmt' => $gmt->format( 'Y-m-d H:i:s' ),
+	);
 }
 
 /**
@@ -1007,7 +1054,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/create-post',
 		array(
 			'label'               => 'Create Post',
-			'description'         => 'Create new content. Choose the type carefully. ' . wma_types_description() . ' Use status "draft" for review (default), "pending", or "publish" (requires publish capability). Hierarchical types accept the optional parent_id (parent must be of the same content type) and menu_order. Types without an editor automatically store the "content" parameter as the excerpt. Taxonomies can be assigned afterwards via ' . $prefix . '/set-post-terms. Optional "fields" object sets ACF custom fields at creation time — only fields declared for the type are accepted (inventory via ' . $prefix . '/list-post-types); requires ACF. Optional "lang" sets the Polylang language (e.g. "en") and "translations" links the new content to its existing translations as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it.',
+			'description'         => 'Create new content. Choose the type carefully. ' . wma_types_description() . ' Use status "draft" for review (default), "pending", or "publish" (requires publish capability). Hierarchical types accept the optional parent_id (parent must be of the same content type) and menu_order. Types without an editor automatically store the "content" parameter as the excerpt. Taxonomies can be assigned afterwards via ' . $prefix . '/set-post-terms. Optional "fields" object sets ACF custom fields at creation time — only fields declared for the type are accepted (inventory via ' . $prefix . '/list-post-types); requires ACF. Optional "lang" sets the Polylang language (e.g. "en") and "translations" links the new content to its existing translations as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it. Optional "date" sets/changes the publish date (ISO 8601 or "YYYY-MM-DD HH:MM:SS", site timezone; future dates refused).
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1049,6 +1096,10 @@ add_action( 'wp_abilities_api_init', static function () {
 						'type'        => 'string',
 						'description' => 'Optional excerpt. For types without an editor, the "content" parameter is stored here automatically.',
 					),
+					'date'        => array(
+						'type'        => 'string',
+						'description' => 'Optional publish date (ISO 8601 e.g. "2023-02-01T14:47:41+01:00", or "YYYY-MM-DD HH:MM:SS" in the site timezone). Future dates are refused.',
+					),
 					'lang'        => array(
 						'type'        => 'string',
 						'description' => 'Optional Polylang language slug (e.g. "en") assigned to the new content. Requires Polylang.',
@@ -1077,6 +1128,10 @@ add_action( 'wp_abilities_api_init', static function () {
 						'type'  => 'array',
 						'items' => array( 'type' => 'string' ),
 					),
+					'date'           => array(
+						'type'        => 'string',
+						'description' => 'Publish date applied in this call (empty when the "date" parameter was not provided).',
+					),
 					'lang'           => array(
 						'type'        => 'string',
 						'description' => 'Effective Polylang language slug of the content (empty if Polylang is inactive).',
@@ -1103,7 +1158,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/update-post',
 		array(
 			'label'               => 'Update Post',
-			'description'         => 'Update an existing content item. Provide the post ID and at least one field to change (title, content, status, slug, excerpt, parent_id, menu_order). Optional "post_type" acts as a safety check: if provided and different from the actual content type of the post, the update is REFUSED. Note: types without an editor store the "content" parameter in the excerpt instead. Optional "fields" object updates ACF custom fields — only fields declared for the type are accepted; requires ACF. Optional "lang" changes the Polylang language (e.g. "en") and "translations" replaces the Polylang translation group as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it.',
+			'description'         => 'Update an existing content item. Provide the post ID and at least one field to change (title, content, status, slug, excerpt, parent_id, menu_order). Optional "post_type" acts as a safety check: if provided and different from the actual content type of the post, the update is REFUSED. Note: types without an editor store the "content" parameter in the excerpt instead. Optional "fields" object updates ACF custom fields — only fields declared for the type are accepted; requires ACF. Optional "lang" changes the Polylang language (e.g. "en") and "translations" replaces the Polylang translation group as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it. Optional "date" sets/changes the publish date (ISO 8601 or "YYYY-MM-DD HH:MM:SS", site timezone; future dates refused).
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1147,6 +1202,10 @@ add_action( 'wp_abilities_api_init', static function () {
 						'type'        => 'string',
 						'description' => 'New excerpt. For types without an editor, the "content" parameter updates it too.',
 					),
+					'date'        => array(
+						'type'        => 'string',
+						'description' => 'New publish date (ISO 8601 e.g. "2023-02-01T14:47:41+01:00", or "YYYY-MM-DD HH:MM:SS" in the site timezone). Future dates are refused.',
+					),
 					'lang'        => array(
 						'type'        => 'string',
 						'description' => 'New Polylang language slug (e.g. "en") for this content. Requires Polylang.',
@@ -1174,6 +1233,10 @@ add_action( 'wp_abilities_api_init', static function () {
 					'fields_applied' => array(
 						'type'  => 'array',
 						'items' => array( 'type' => 'string' ),
+					),
+					'date'           => array(
+						'type'        => 'string',
+						'description' => 'Publish date applied in this call (empty when the "date" parameter was not provided).',
 					),
 					'lang'           => array(
 						'type'        => 'string',
@@ -2061,6 +2124,17 @@ function wma_exec_create_post( $input = array() ) {
 		$postarr['menu_order'] = (int) $input['menu_order'];
 	}
 
+	// Date de publication (facultative) : validée AVANT insertion.
+	$parsed_date = null;
+	if ( isset( $input['date'] ) && '' !== trim( (string) $input['date'] ) ) {
+		$parsed_date = wma_parse_date( (string) $input['date'] );
+		if ( is_wp_error( $parsed_date ) ) {
+			return $parsed_date;
+		}
+		$postarr['post_date']     = $parsed_date['date'];
+		$postarr['post_date_gmt'] = $parsed_date['date_gmt'];
+	}
+
 	// Polylang (facultatif) : refuse AVANT création une langue invalide ou
 	// une demande de traductions sans Polylang — rien ne doit rester à moitié créé.
 	if ( isset( $input['lang'] ) && '' !== trim( (string) $input['lang'] ) ) {
@@ -2108,6 +2182,7 @@ function wma_exec_create_post( $input = array() ) {
 		'link'           => $post ? (string) get_permalink( $post ) : '',
 		'edit_url'       => (string) get_edit_post_link( (int) $post_id, 'raw' ),
 		'fields_applied' => $applied,
+		'date'           => $parsed_date ? (string) $parsed_date['date'] : '',
 		'lang'           => $pll_state['lang'],
 		'translations'   => $pll_state['translations'],
 	);
@@ -2202,6 +2277,17 @@ function wma_exec_update_post( $input = array() ) {
 		$postarr['menu_order'] = (int) $input['menu_order'];
 	}
 
+	// Date de publication (facultative) : validée AVANT écriture.
+	$parsed_date = null;
+	if ( isset( $input['date'] ) && '' !== trim( (string) $input['date'] ) ) {
+		$parsed_date = wma_parse_date( (string) $input['date'] );
+		if ( is_wp_error( $parsed_date ) ) {
+			return $parsed_date;
+		}
+		$postarr['post_date']     = $parsed_date['date'];
+		$postarr['post_date_gmt'] = $parsed_date['date_gmt'];
+	}
+
 	// Polylang (facultatif) : refuse AVANT écriture une langue invalide ou
 	// une demande de traductions sans Polylang — rien ne doit être écrit à moitié.
 	if ( isset( $input['lang'] ) && '' !== trim( (string) $input['lang'] ) ) {
@@ -2260,6 +2346,7 @@ function wma_exec_update_post( $input = array() ) {
 		'link'           => $updated ? (string) get_permalink( $updated ) : '',
 		'edit_url'       => (string) get_edit_post_link( (int) $result, 'raw' ),
 		'fields_applied' => $applied,
+		'date'           => $parsed_date ? (string) $parsed_date['date'] : '',
 		'lang'           => $pll_state['lang'],
 		'translations'   => $pll_state['translations'],
 	);
