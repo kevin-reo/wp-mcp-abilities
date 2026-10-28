@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.4.1
+ * Version:     5.5.0
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -117,6 +117,13 @@
  *                  des comptes disposant de « unfiltered_html » (comportement du cœur) :
  *                  un admin écrivant via MCP ne perd plus le markup hors liste blanche
  *                  kses (SVG inline des blocs wp:html, iframes…).
+ *  - v5.5        : support Polylang (facultatif) — paramètres « lang » (code langue,
+ *                  ex. « en ») et « translations » (groupe complet langue => ID) sur
+ *                  site/create-post et site/update-post. Assignation via
+ *                  pll_set_post_language(), liaison du groupe via
+ *                  pll_save_post_translations(), code langage validé contre
+ *                  pll_languages_list(); réponse enrichie de « lang » et
+ *                  « translations » (langue effective et groupe courant).
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -124,7 +131,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.4.1' );
+define( 'WMA_VERSION', '5.5.0' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -527,6 +534,143 @@ function wma_kses_content( string $content ): string {
 }
 
 /**
+ * Polylang est-il actif et exploitable (langue + traductions de contenus) ?
+ *
+ * @return bool
+ */
+function wma_polylang_active(): bool {
+	return function_exists( 'pll_set_post_language' )
+		&& function_exists( 'pll_save_post_translations' )
+		&& function_exists( 'pll_get_post_language' )
+		&& function_exists( 'pll_get_post_translations' )
+		&& function_exists( 'pll_languages_list' );
+}
+
+/**
+ * Valide un code langue Polylang demandé.
+ *
+ * @param string $lang Code demandé (nettoyé).
+ * @return string|WP_Error Le code langue validé, ou une erreur.
+ */
+function wma_polylang_check_language( string $lang ) {
+	if ( ! wma_polylang_active() ) {
+		return new WP_Error(
+			'wma_polylang_missing',
+			'Polylang is not active on this site: the "lang" parameter cannot be applied.'
+		);
+	}
+
+	$lang  = sanitize_key( $lang );
+	$langs = (array) pll_languages_list();
+	if ( '' === $lang || ( $langs && ! in_array( $lang, $langs, true ) ) ) {
+		return new WP_Error(
+			'wma_invalid_language',
+			sprintf(
+				'Unknown Polylang language "%1$s". Available languages: %2$s.',
+				$lang,
+				implode( ', ', $langs )
+			)
+		);
+	}
+
+	return $lang;
+}
+
+/**
+ * Assigne une langue Polylang à un contenu, avec validation du code langue.
+ *
+ * @param int    $post_id ID de contenu.
+ * @param string $lang    Code langue Polylang (ex. « en »).
+ * @return true|WP_Error
+ */
+function wma_polylang_set_language( int $post_id, string $lang ) {
+	$checked = wma_polylang_check_language( $lang );
+	if ( is_wp_error( $checked ) ) {
+		return $checked;
+	}
+	$lang = $checked;
+
+	if ( ! pll_set_post_language( $post_id, $lang ) && pll_get_post_language( $post_id ) !== $lang ) {
+		return new WP_Error(
+			'wma_language_not_set',
+			sprintf( 'Language "%1$s" could not be assigned to content %2$d.', $lang, $post_id )
+		);
+	}
+
+	return true;
+}
+
+/**
+ * Enregistre le groupe de traductions Polylang d'un contenu.
+ *
+ * Le groupe remplace l'existant : c'est la carte complète langue => ID.
+ * Le contenu courant est toujours inclus sous sa langue effective ; il doit
+ * donc avoir une langue avant l'appel (passer « lang » d'abord).
+ *
+ * @param int   $post_id     ID du contenu sujet.
+ * @param mixed $translations Carte langue => ID (IDs étrangers existants requis).
+ * @return true|WP_Error
+ */
+function wma_polylang_save_translations( int $post_id, $translations ) {
+	if ( ! wma_polylang_active() ) {
+		return new WP_Error(
+			'wma_polylang_missing',
+			'Polylang is not active on this site: the "translations" parameter cannot be applied.'
+		);
+	}
+
+	$map = array();
+	foreach ( (array) $translations as $lang => $id ) {
+		$lang = sanitize_key( (string) $lang );
+		$id   = absint( $id );
+		if ( '' === $lang || ! $id ) {
+			continue;
+		}
+		if ( $post_id !== $id && ! get_post( $id ) ) {
+			return new WP_Error(
+				'wma_invalid_translation_id',
+				sprintf( 'Translation target %1$d (language "%2$s") does not exist.', $id, $lang )
+			);
+		}
+		$map[ $lang ] = $id;
+	}
+
+	$own = (string) pll_get_post_language( $post_id );
+	if ( '' === $own ) {
+		return new WP_Error(
+			'wma_language_required',
+			sprintf( 'Content %1$d has no Polylang language yet: pass "lang" before "translations".', $post_id )
+		);
+	}
+
+	$map[ $own ] = $post_id;
+
+	pll_save_post_translations( $map );
+
+	return true;
+}
+
+/**
+ * État Polylang d'un contenu, pour enrichir les réponses create/update.
+ *
+ * @param int $post_id ID de contenu.
+ * @return array{lang:string,translations:array<int,int>}
+ */
+function wma_polylang_state( int $post_id ): array {
+	if ( ! wma_polylang_active() ) {
+		return array(
+			'lang'         => '',
+			'translations' => array(),
+		);
+	}
+
+	return array(
+		'lang'         => (string) pll_get_post_language( $post_id ),
+		'translations' => array_map( 'absint', (array) pll_get_post_translations( $post_id ) ),
+	);
+}
+
+/**
  * Garde anti-SSRF élémentaire pour l'import média par URL distante :
  * schémas http(s) uniquement et hôte public requis (les adresses
  * privées, de boucle locale ou réservées sont refusées AVANT tout
@@ -863,7 +1007,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/create-post',
 		array(
 			'label'               => 'Create Post',
-			'description'         => 'Create new content. Choose the type carefully. ' . wma_types_description() . ' Use status "draft" for review (default), "pending", or "publish" (requires publish capability). Hierarchical types accept the optional parent_id (parent must be of the same content type) and menu_order. Types without an editor automatically store the "content" parameter as the excerpt. Taxonomies can be assigned afterwards via ' . $prefix . '/set-post-terms. Optional "fields" object sets ACF custom fields at creation time — only fields declared for the type are accepted (inventory via ' . $prefix . '/list-post-types); requires ACF.',
+			'description'         => 'Create new content. Choose the type carefully. ' . wma_types_description() . ' Use status "draft" for review (default), "pending", or "publish" (requires publish capability). Hierarchical types accept the optional parent_id (parent must be of the same content type) and menu_order. Types without an editor automatically store the "content" parameter as the excerpt. Taxonomies can be assigned afterwards via ' . $prefix . '/set-post-terms. Optional "fields" object sets ACF custom fields at creation time — only fields declared for the type are accepted (inventory via ' . $prefix . '/list-post-types); requires ACF. Optional "lang" sets the Polylang language (e.g. "en") and "translations" links the new content to its existing translations as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -905,6 +1049,15 @@ add_action( 'wp_abilities_api_init', static function () {
 						'type'        => 'string',
 						'description' => 'Optional excerpt. For types without an editor, the "content" parameter is stored here automatically.',
 					),
+					'lang'        => array(
+						'type'        => 'string',
+						'description' => 'Optional Polylang language slug (e.g. "en") assigned to the new content. Requires Polylang.',
+					),
+					'translations' => array(
+						'type'                 => 'object',
+						'additionalProperties' => array( 'type' => 'integer' ),
+						'description'          => 'Optional Polylang translation group: language slug => existing post ID. This content is added automatically under its own language. Requires Polylang.',
+					),
 					'fields'   => array(
 						'type'        => 'object',
 						'description' => 'Optional ACF custom field values, keyed by field name. Only fields declared in ACF for this content type are accepted — check the field inventory via ' . $prefix . '/list-post-types. Requires ACF.',
@@ -924,6 +1077,15 @@ add_action( 'wp_abilities_api_init', static function () {
 						'type'  => 'array',
 						'items' => array( 'type' => 'string' ),
 					),
+					'lang'           => array(
+						'type'        => 'string',
+						'description' => 'Effective Polylang language slug of the content (empty if Polylang is inactive).',
+					),
+					'translations'   => array(
+						'type'                 => 'object',
+						'additionalProperties' => array( 'type' => 'integer' ),
+						'description'          => 'Current Polylang translation group of the content (language slug => post ID).',
+					),
 				),
 				'required'   => array( 'success', 'id' ),
 			),
@@ -941,7 +1103,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/update-post',
 		array(
 			'label'               => 'Update Post',
-			'description'         => 'Update an existing content item. Provide the post ID and at least one field to change (title, content, status, slug, excerpt, parent_id, menu_order). Optional "post_type" acts as a safety check: if provided and different from the actual content type of the post, the update is REFUSED. Note: types without an editor store the "content" parameter in the excerpt instead. Optional "fields" object updates ACF custom fields — only fields declared for the type are accepted; requires ACF.',
+			'description'         => 'Update an existing content item. Provide the post ID and at least one field to change (title, content, status, slug, excerpt, parent_id, menu_order). Optional "post_type" acts as a safety check: if provided and different from the actual content type of the post, the update is REFUSED. Note: types without an editor store the "content" parameter in the excerpt instead. Optional "fields" object updates ACF custom fields — only fields declared for the type are accepted; requires ACF. Optional "lang" changes the Polylang language (e.g. "en") and "translations" replaces the Polylang translation group as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -985,6 +1147,15 @@ add_action( 'wp_abilities_api_init', static function () {
 						'type'        => 'string',
 						'description' => 'New excerpt. For types without an editor, the "content" parameter updates it too.',
 					),
+					'lang'        => array(
+						'type'        => 'string',
+						'description' => 'New Polylang language slug (e.g. "en") for this content. Requires Polylang.',
+					),
+					'translations' => array(
+						'type'                 => 'object',
+						'additionalProperties' => array( 'type' => 'integer' ),
+						'description'          => 'New Polylang translation group: language slug => post ID. This content is added automatically under its own language. Requires Polylang.',
+					),
 					'fields'   => array(
 						'type'        => 'object',
 						'description' => 'Optional ACF custom field values, keyed by field name. Only fields declared in ACF for this content type are accepted — check the field inventory via ' . $prefix . '/list-post-types. Requires ACF.',
@@ -1003,6 +1174,15 @@ add_action( 'wp_abilities_api_init', static function () {
 					'fields_applied' => array(
 						'type'  => 'array',
 						'items' => array( 'type' => 'string' ),
+					),
+					'lang'           => array(
+						'type'        => 'string',
+						'description' => 'Effective Polylang language slug of the content (empty if Polylang is inactive).',
+					),
+					'translations'   => array(
+						'type'                 => 'object',
+						'additionalProperties' => array( 'type' => 'integer' ),
+						'description'          => 'Current Polylang translation group of the content (language slug => post ID).',
 					),
 				),
 				'required'   => array( 'success', 'id' ),
@@ -1881,6 +2061,21 @@ function wma_exec_create_post( $input = array() ) {
 		$postarr['menu_order'] = (int) $input['menu_order'];
 	}
 
+	// Polylang (facultatif) : refuse AVANT création une langue invalide ou
+	// une demande de traductions sans Polylang — rien ne doit rester à moitié créé.
+	if ( isset( $input['lang'] ) && '' !== trim( (string) $input['lang'] ) ) {
+		$checked = wma_polylang_check_language( (string) $input['lang'] );
+		if ( is_wp_error( $checked ) ) {
+			return $checked;
+		}
+	}
+	if ( isset( $input['translations'] ) && ! wma_polylang_active() ) {
+		return new WP_Error(
+			'wma_polylang_missing',
+			'Polylang is not active on this site: the "translations" parameter cannot be applied.'
+		);
+	}
+
 	$post_id = wp_insert_post( wp_slash( $postarr ), true );
 
 	if ( is_wp_error( $post_id ) ) {
@@ -1891,6 +2086,21 @@ function wma_exec_create_post( $input = array() ) {
 
 	$applied = wma_apply_acf_fields( $input['fields'] ?? null, (int) $post_id );
 
+	// Polylang (facultatif) : langue d'abord, puis groupe de traductions.
+	if ( ! empty( $input['lang'] ) ) {
+		$pll = wma_polylang_set_language( (int) $post_id, (string) $input['lang'] );
+		if ( is_wp_error( $pll ) ) {
+			return $pll;
+		}
+	}
+	if ( ! empty( $input['translations'] ) && is_array( $input['translations'] ) ) {
+		$pll = wma_polylang_save_translations( (int) $post_id, $input['translations'] );
+		if ( is_wp_error( $pll ) ) {
+			return $pll;
+		}
+	}
+	$pll_state = wma_polylang_state( (int) $post_id );
+
 	return array(
 		'success'        => true,
 		'id'             => (int) $post_id,
@@ -1898,6 +2108,8 @@ function wma_exec_create_post( $input = array() ) {
 		'link'           => $post ? (string) get_permalink( $post ) : '',
 		'edit_url'       => (string) get_edit_post_link( (int) $post_id, 'raw' ),
 		'fields_applied' => $applied,
+		'lang'           => $pll_state['lang'],
+		'translations'   => $pll_state['translations'],
 	);
 }
 
@@ -1990,10 +2202,25 @@ function wma_exec_update_post( $input = array() ) {
 		$postarr['menu_order'] = (int) $input['menu_order'];
 	}
 
-	if ( count( $postarr ) < 2 && empty( $input['fields'] ) ) {
+	// Polylang (facultatif) : refuse AVANT écriture une langue invalide ou
+	// une demande de traductions sans Polylang — rien ne doit être écrit à moitié.
+	if ( isset( $input['lang'] ) && '' !== trim( (string) $input['lang'] ) ) {
+		$checked = wma_polylang_check_language( (string) $input['lang'] );
+		if ( is_wp_error( $checked ) ) {
+			return $checked;
+		}
+	}
+	if ( isset( $input['translations'] ) && ! wma_polylang_active() ) {
+		return new WP_Error(
+			'wma_polylang_missing',
+			'Polylang is not active on this site: the "translations" parameter cannot be applied.'
+		);
+	}
+
+	if ( count( $postarr ) < 2 && empty( $input['fields'] ) && empty( $input['lang'] ) && empty( $input['translations'] ) ) {
 		return new WP_Error(
 			'wma_nothing_to_update',
-			'Nothing to update: provide at least one field among title, content, status, slug, excerpt, parent_id, menu_order, or ACF fields.'
+			'Nothing to update: provide at least one field among title, content, status, slug, excerpt, parent_id, menu_order, ACF fields, or Polylang lang/translations.'
 		);
 	}
 
@@ -2011,6 +2238,21 @@ function wma_exec_update_post( $input = array() ) {
 
 	$applied = wma_apply_acf_fields( $input['fields'] ?? null, (int) $result );
 
+	// Polylang (facultatif) : langue d'abord, puis groupe de traductions.
+	if ( ! empty( $input['lang'] ) ) {
+		$pll = wma_polylang_set_language( (int) $result, (string) $input['lang'] );
+		if ( is_wp_error( $pll ) ) {
+			return $pll;
+		}
+	}
+	if ( ! empty( $input['translations'] ) && is_array( $input['translations'] ) ) {
+		$pll = wma_polylang_save_translations( (int) $result, $input['translations'] );
+		if ( is_wp_error( $pll ) ) {
+			return $pll;
+		}
+	}
+	$pll_state = wma_polylang_state( (int) $result );
+
 	return array(
 		'success'        => true,
 		'id'             => (int) $result,
@@ -2018,6 +2260,8 @@ function wma_exec_update_post( $input = array() ) {
 		'link'           => $updated ? (string) get_permalink( $updated ) : '',
 		'edit_url'       => (string) get_edit_post_link( (int) $result, 'raw' ),
 		'fields_applied' => $applied,
+		'lang'           => $pll_state['lang'],
+		'translations'   => $pll_state['translations'],
 	);
 }
 

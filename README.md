@@ -74,13 +74,24 @@ Préfixe / catégorie neutre : **`site`** — identique sur tous les sites.
 | `site/delete-media` | écriture | Suppression d'un média — **refusée** si l'ID n'est pas un média ; corbeille si activée, sinon définitive (`force=true` pour forcer) |
 | `site/list-taxonomies` | lecture | Taxonomies publiques détectées, leurs types de contenus et inventaire `acf_fields` |
 | `site/list-terms` | lecture | Termes d'une taxonomie publique (recherche + pagination) — `include_fields=true` pour les valeurs ACF de chaque terme |
-| `site/create-post` | écriture | Création de contenu — `draft` par défaut, `parent_id`/`menu_order` pour les types hiérarchiques, `fields` pour les champs ACF |
-| `site/update-post` | écriture | Mise à jour (title, content, status, slug, excerpt, parent_id, menu_order, `fields` ACF) |
+| `site/create-post` | écriture | Création de contenu — `draft` par défaut, `parent_id`/`menu_order` pour les types hiérarchiques, `fields` pour les champs ACF, `lang`/`translations` pour Polylang (voir plus bas) |
+| `site/update-post` | écriture | Mise à jour (title, content, status, slug, excerpt, parent_id, menu_order, `fields` ACF, `lang`/`translations` Polylang) |
 | `site/delete-post` | écriture | Suppression — `post_type` **REQUIS** (garde-fou anti-confusion) |
 | `site/set-post-terms` | écriture | Assignation de termes (par IDs ou noms, ajout ou remplacement) |
 | `site/create-term` | écriture | Création d'un terme (name, slug, description, parent, `fields` ACF) |
 | `site/update-term` | écriture | Mise à jour d'un terme (taxonomie vérifiée, `fields` ACF) |
 | `site/delete-term` | écriture | Suppression d'un terme — **refusée** si encore assigné (sauf `force=true`) |
+
+## Multilingue (Polylang, optionnel)
+
+Quand **Polylang** est actif, `site/create-post` et `site/update-post` acceptent deux paramètres supplémentaires :
+
+- **`lang`** (string) : code langue Polylang du contenu, ex. `"en"`. Validé contre `pll_languages_list()` (refus explicite si inconnu) — la validation se fait **avant** l'écriture sur create comme sur update.
+- **`translations`** (objet `langue => post ID`) : rattache le contenu à son groupe de traductions. C'est la carte **complète** du groupe : le contenu courant est ajouté automatiquement sous sa langue effective (passer `lang` d'abord). Attention : un appel ultérieur avec une carte différente **remplace** le groupe existant.
+
+La réponse de create/update renvoie toujours `lang` (code effectif, vide si Polylang inactif) et `translations` (carte courante) — l'agent peut vérifier le lien sans re-lecture.
+
+Sans Polylang : `lang` est refusé avant écriture avec une erreur explicite (`wma_polylang_missing`), `translations` n'est pas appliqué. Les taxonomies internes de Polylang (`language`, `post_translations`) ne sont pas exposées via `site/set-post-terms`.
 
 ## Garde-fous (anti-incident IA)
 
@@ -258,7 +269,7 @@ Contrôle indépendant du client avec curl (attendu : `200`) : `curl -u "identif
 wp-mcp-abilities/
 ├── .gitignore                 ← exclut les références locales
 ├── README.md                 ← ce fichier
-└── wp-mcp-abilities.php      ← connecteur générique v5.4 (à déployer)
+└── wp-mcp-abilities.php      ← connecteur générique v5.5 (à déployer)
 ```
 
 ## Historique
@@ -272,6 +283,7 @@ wp-mcp-abilities/
 | **v5.3** | `wp-mcp-abilities.php` | **Champs personnalisés ACF** : lecture (`fields` dans get-post, inventaires `acf_fields`, `include_fields` sur list-terms) et écriture (`fields` sur create/update-post et create/update-term, liste blanche stricte) |
 | **v5.4** | `wp-mcp-abilities.php` | **Durcissement sécurité** : lectures status-aware (les non-publiés ne sont lisibles que par qui peut les éditer), garde anti-SSRF sur l'import média par URL (http(s), hôte public) + filtre `wma_allow_url_sideload` |
 | **v5.4.1** | `wp-mcp-abilities.php` | **Fix kses conditionnel** : `wp_kses_post()` n'est plus appliqué aux contenus (`create-post` / `update-post`) ni aux descriptions de termes (`create-term` / `update-term`) des comptes disposant de `unfiltered_html` (comportement du cœur) — un admin écrivant via MCP ne perd plus le markup hors liste blanche kses (SVG inline des blocs `wp:html`, iframes…) |
+| **v5.5.0** | `wp-mcp-abilities.php` | **Support Polylang (optionnel)** : `lang` (code langue, validé contre `pll_languages_list()` avant écriture) et `translations` (groupe complet langue => ID) sur `create-post` / `update-post`, via `pll_set_post_language()` et `pll_save_post_translations()` ; réponses enrichies (`lang`, `translations`) |
 
 ## Licence
 
