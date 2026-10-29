@@ -94,16 +94,22 @@
  *  - site/delete-media refuse tout ID qui n'est pas un média (« attachment ») ;
  *  - écriture des champs ACF limitée aux champs déclarés pour le type/la
  *    taxonomie (liste blanche stricte) ;
- *  - contenus non publiés réservés au rôle admin (filtre wma_nonpublic_roles) :
- *    statuts ≠ « publish » (draft, pending, private, future…) refusés sur
- *    get-post, get-recent-posts et search-posts (sauf paramètre post_status
- *    explicite), et sur l'édition (update-post, delete-post, set-post-terms)
- *    d'une cible non publiée ;
+ *  - contenus non publics réservés au rôle admin (filtre wma_nonpublic_roles) :
+ *    statuts ≠ « publish » refusés sur get-post (404 générique : pas de
+ *    divulgation d'existence, de statut ni de type), get-recent-posts et
+ *    search-posts (paramètre post_status explicite), édition/suppression
+ *    d'une cible non publiée (update-post, delete-post, set-post-terms),
+ *    création non publique (create-post) et bascule vers un statut non
+ *    public (update-post) — les capabilities edit_posts/edit_post ne
+ *    suffisent plus pour ces contenus ;
  *  - types de contenus non publics (v5.6.1 : formulaires de plugins, CPT
  *    internes…) invisibles par défaut — la découverte (list-post-types,
  *    « non_public » => true) et l'édition (create/update/delete-post,
- *    set-post-terms) exigent l'accès aux contenus non publics ; le type
- *    « attachment » reste réservé aux abilities médias dédiées ;
+ *    set-post-terms) exigent l'accès aux contenus non publics ; le garde-fou
+ *    wma_post_type_gate refuse tout type hors liste exposée (types internes
+ *    « revision », « nav_menu_item »… — sinon lisibles via leur statut
+ *    inherit/publish : contournement interdit) et « attachment » reste
+ *    réservé aux abilities médias dédiées ;
  *  - upload-media en mode URL : schémas http(s) uniquement, hôte public requis
  *    (plages privées/réservées refusées avant téléchargement), désactivable via
  *    wma_allow_url_sideload ;
@@ -172,6 +178,16 @@
  *                  formulaires CF7, le corps du formulaire et les réglages
  *                  (mails, messages) vivent en post méta et restent hors du
  *                  périmètre des abilities génériques.
+ *                  Revue sécurité (même version, avant publication) :
+ *                  wma_post_type_gate refuse tout type hors liste exposée
+ *                  (« revision », types internes sans interface — sinon
+ *                  lisibles via leur statut : contournement interdit) ;
+ *                  get-post ne divulgue plus existence/statut/type aux
+ *                  non-admins (404 identique, slug public prioritaire) ;
+ *                  create-post refuse les statuts non publics aux
+ *                  non-admins (+ enum « private ») et update-post la bascule
+ *                  vers un statut non public (un éditeur ne peut plus
+ *                  dépublier via le connecteur).
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -347,7 +363,13 @@ function wma_format_post( WP_Post $post ): array {
  * @return bool
  */
 function wma_is_nonpublic_post( $post ): bool {
-	$p      = ( $post instanceof WP_Post ) ? $post : get_post( $post );
+	$p = null;
+	if ( $post instanceof WP_Post ) {
+		$p = $post;
+	} elseif ( is_numeric( $post ) ) {
+		$p = get_post( (int) $post );
+	}
+
 	$status = $p ? (string) $p->post_status : '';
 	$public = array( 'publish', 'inherit' );
 
@@ -361,6 +383,9 @@ function wma_is_nonpublic_post( $post ): bool {
  * non publiés (lecture, recherche, édition) ne dépend plus des capacités
  * edit_posts/edit_post, mais du rôle admin uniquement. Étensible via le filtre
  * wma_nonpublic_roles (liste de rôles autorisés).
+ *
+ * Multisite : le rôle est celui du site courant — un super admin sans rôle
+ * sur le site peut être autorisé via le filtre.
  *
  * @return bool
  */
@@ -429,18 +454,24 @@ function wma_allowed_post_types(): array {
 
 /**
  * Garde-fou d'exécution sur le TYPE de contenu demandé :
- *  - type public (ou type par défaut) : OK, comportement inchangé ;
- *  - type non public : refusé si le compte ne peut pas consulter les
- *    contenus non publics (rôle admin par défaut, filtre
- *    wma_nonpublic_roles) ;
- *  - « attachment » : refusé — les médias passent par les abilities dédiées.
+ *  - type exposé pour le compte courant (public, ou non public avec
+ *    l'accès dédié) ou type par défaut : OK ;
+ *  - « attachment » : refusé — les médias passent par les abilities dédiées ;
+ *  - type inconnu : refus explicite (les enums ont disparu des schémas,
+ *    la validation se fait ici) ;
+ *  - tout autre type : refusé — non public sans l'accès dédié, ou type
+ *    volontairement hors listes (ex. « revision », « nav_menu_item »,
+ *    types internes sans interface, ou retiré via wma_post_types).
+ *    SANS ce garde, les types internes à statut « publish »/« inherit »
+ *    seraient lisibles : contournement interdit des garde-fous non publics.
  *
  * @param string $post_type Slug du type de contenu demandé.
  * @return true|WP_Error
  */
 function wma_post_type_gate( string $post_type ) {
-	if ( '' === $post_type || in_array( $post_type, wma_post_types(), true ) ) {
-		return true; // Type public (ou type par défaut) : inchangé.
+	// Type vide (défaut) ou type exposé pour le compte courant : OK.
+	if ( '' === $post_type || in_array( $post_type, wma_allowed_post_types(), true ) ) {
+		return true;
 	}
 
 	if ( 'attachment' === $post_type ) {
@@ -450,13 +481,15 @@ function wma_post_type_gate( string $post_type ) {
 		);
 	}
 
-	// Type inconnu ou simplement non listé hors administration : ce n'est pas
-	// le rôle de ce garde-fou — l'exécution renvoie son erreur dédiée.
-	if ( ! post_type_exists( $post_type ) || ! in_array( $post_type, wma_nonpublic_post_types(), true ) ) {
-		return true;
+	if ( ! post_type_exists( $post_type ) ) {
+		return new WP_Error(
+			'wma_post_type_forbidden',
+			'Unknown content type "' . $post_type . '". Call ' . wma_category() . '/list-post-types to discover the available types.'
+		);
 	}
 
-	if ( ! wma_can_access_nonpublic() ) {
+	// Type existant mais non exposé au compte courant.
+	if ( ! wma_can_access_nonpublic() && wma_is_nonpublic_post_type( $post_type ) ) {
 		return new WP_Error(
 			'wma_post_type_forbidden',
 			sprintf(
@@ -466,7 +499,10 @@ function wma_post_type_gate( string $post_type ) {
 		);
 	}
 
-	return true;
+	return new WP_Error(
+		'wma_post_type_forbidden',
+		'Content type "' . $post_type . '" is not exposed by this connector. Allowed: ' . implode( ', ', wma_allowed_post_types() )
+	);
 }
 
 /**
@@ -1257,7 +1293,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/get-post',
 		array(
 			'label'               => 'Get Post',
-			'description'         => 'Retrieve a single content item with its full content, by numeric ID or slug. The result carries "type" and "type_label" identifying its content type — check them before updating or deleting. When ACF is active, the result also carries a "fields" object with the custom field values of the content. Non-public content (draft, private…) is only readable by the administrator role.',
+			'description'         => 'Retrieve a single content item with its full content, by numeric ID or slug. The result carries "type" and "type_label" identifying its content type — check them before updating or deleting. When ACF is active, the result also carries a "fields" object with the custom field values of the content. Non-public content (draft, private…, or of a non-public type) is only visible to the administrator role — for other roles it is indistinguishable from a missing post.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1293,7 +1329,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/create-post',
 		array(
 			'label'               => 'Create Post',
-			'description'         => 'Create new content. Choose the type carefully. ' . wma_types_description() . ' Use status "draft" for review (default), "pending", or "publish" (requires publish capability). Hierarchical types accept the optional parent_id (parent must be of the same content type) and menu_order. Types without an editor automatically store the "content" parameter as the excerpt. Taxonomies can be assigned afterwards via ' . $prefix . '/set-post-terms. Optional "fields" object sets ACF custom fields at creation time — only fields declared for the type are accepted (inventory via ' . $prefix . '/list-post-types); requires ACF. Optional "lang" sets the Polylang language (e.g. "en") and "translations" links the new content to its existing translations as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it. Optional "date" sets/changes the publish date (ISO 8601 or "YYYY-MM-DD HH:MM:SS", site timezone; future dates refused).',
+			'description'         => 'Create new content. Choose the type carefully. ' . wma_types_description() . ' Use status "draft" for review (default), "pending", or "publish" (requires publish capability). Hierarchical types accept the optional parent_id (parent must be of the same content type) and menu_order. Types without an editor automatically store the "content" parameter as the excerpt. Taxonomies can be assigned afterwards via ' . $prefix . '/set-post-terms. Optional "fields" object sets ACF custom fields at creation time — only fields declared for the type are accepted (inventory via ' . $prefix . '/list-post-types); requires ACF. Optional "lang" sets the Polylang language (e.g. "en") and "translations" links the new content to its existing translations as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it. Optional "date" sets/changes the publish date (ISO 8601 or "YYYY-MM-DD HH:MM:SS", site timezone; future dates refused). Non-public statuses (draft, pending, private) require the administrator role.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1309,9 +1345,9 @@ add_action( 'wp_abilities_api_init', static function () {
 					),
 					'status'    => array(
 						'type'        => 'string',
-						'enum'        => array( 'draft', 'pending', 'publish' ),
+						'enum'        => array( 'draft', 'pending', 'private', 'publish' ),
 						'default'     => 'draft',
-						'description' => 'New post status (default "draft").',
+						'description' => 'New post status (default "draft"). Non-public statuses (draft, pending, private) require the administrator role.',
 					),
 					'type'      => array(
 						'type'        => 'string',
@@ -1409,7 +1445,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/update-post',
 		array(
 			'label'               => 'Update Post',
-			'description'         => 'Update an existing content item. Provide the post ID and at least one field to change (title, content, status, slug, excerpt, parent_id, menu_order). Optional "post_type" acts as a safety check: if provided and different from the actual content type of the post, the update is REFUSED. Note: types without an editor store the "content" parameter in the excerpt instead. Optional "fields" object updates ACF custom fields — only fields declared for the type are accepted; requires ACF. Optional "lang" changes the Polylang language (e.g. "en") and "translations" replaces the Polylang translation group as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it. Optional "date" sets/changes the publish date (ISO 8601 or "YYYY-MM-DD HH:MM:SS", site timezone; future dates refused). Non-public targets (draft, pending, private…) require the administrator role.',
+			'description'         => 'Update an existing content item. Provide the post ID and at least one field to change (title, content, status, slug, excerpt, parent_id, menu_order). Optional "post_type" acts as a safety check: if provided and different from the actual content type of the post, the update is REFUSED. Note: types without an editor store the "content" parameter in the excerpt instead. Optional "fields" object updates ACF custom fields — only fields declared for the type are accepted; requires ACF. Optional "lang" changes the Polylang language (e.g. "en") and "translations" replaces the Polylang translation group as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it. Optional "date" sets/changes the publish date (ISO 8601 or "YYYY-MM-DD HH:MM:SS", site timezone; future dates refused). Non-public targets (draft, pending, private…) and switching to a non-public status require the administrator role.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -2317,15 +2353,31 @@ function wma_exec_get_post( $input = array() ) {
 	if ( ! empty( $input['post_id'] ) ) {
 		$post = get_post( absint( $input['post_id'] ) );
 	} elseif ( ! empty( $input['slug'] ) ) {
-		$found = get_posts(
+		// Recherche par slug en deux temps : le public d'abord (un brouillon
+		// ne peut pas masquer un publié portant le même slug), puis — pour
+		// les seuls comptes autorisés — statuts et types non publics.
+		$slug   = sanitize_title( (string) $input['slug'] );
+		$public = get_posts(
 			array(
-				'name'        => sanitize_title( (string) $input['slug'] ),
-				'post_type'   => wma_can_access_nonpublic() ? wma_allowed_post_types() : 'any',
-				'post_status' => array( 'publish', 'draft', 'private', 'pending' ),
+				'name'        => $slug,
+				'post_type'   => 'any',
+				'post_status' => 'publish',
 				'numberposts' => 1,
 			)
 		);
-		$post = $found[0] ?? null;
+		$post = $public[0] ?? null;
+
+		if ( ! $post && wma_can_access_nonpublic() ) {
+			$found = get_posts(
+				array(
+					'name'        => $slug,
+					'post_type'   => wma_allowed_post_types(),
+					'post_status' => array( 'publish', 'draft', 'pending', 'private', 'future' ),
+					'numberposts' => 1,
+				)
+			);
+			$post = $found[0] ?? null;
+		}
 	}
 
 	if ( ! $post ) {
@@ -2335,18 +2387,25 @@ function wma_exec_get_post( $input = array() ) {
 		);
 	}
 
-	// Garde-fou : les types de contenus non publics ne sont lisibles que
-	// par les comptes autorisés à consulter les contenus non publics.
-	$type_gate = wma_post_type_gate( $post->post_type );
-	if ( is_wp_error( $type_gate ) ) {
-		return $type_gate;
+	// Garde-fou : contenus non publics (statut non public, ou type non
+	// public) — pour un compte non autorisé, ils sont INDISCERNABLES d'un
+	// contenu inexistant : pas de divulgation d'existence, de statut ni de
+	// type (l'erreur est le 404 générique déjà renvoyé plus haut).
+	if ( ! wma_can_access_nonpublic() && ( wma_is_nonpublic_post( $post ) || wma_is_nonpublic_post_type( $post->post_type ) ) ) {
+		return new WP_Error(
+			'wma_post_not_found',
+			'Post not found: provide a valid "post_id" or "slug".'
+		);
 	}
 
-	// Garde-fou : un contenu non publié n'est lisible que par le rôle admin.
-	if ( wma_is_nonpublic_post( $post ) && ! wma_can_access_nonpublic() ) {
+	// Garde-fou : type non exposé par le connecteur pour ce compte (types
+	// internes sans interface — « revision », « nav_menu_item »… — ou
+	// retiré via les filtres) : même refus générique, y compris pour les
+	// comptes autorisés (ces types ne sont pas gérés par les abilities).
+	if ( ! in_array( $post->post_type, wma_allowed_post_types(), true ) ) {
 		return new WP_Error(
-			'wma_post_forbidden',
-			'Reading non-public content (status: ' . $post->post_status . ') requires the administrator role.'
+			'wma_post_not_found',
+			'Post not found: provide a valid "post_id" or "slug".'
 		);
 	}
 
@@ -2386,6 +2445,19 @@ function wma_exec_create_post( $input = array() ) {
 		return $type_gate;
 	}
 
+	// Garde-fou : créer un contenu NON public (draft, pending, private) sur
+	// un type public exige le rôle admin — cohérent avec la politique « les
+	// contenus non publics ne passent que par l'admin via ce connecteur »
+	// (un compte non admin ne pourrait de toute façon plus le relire ni
+	// l'éditer). Les types non publics sont déjà réservés à l'admin via le
+	// garde de type ci-dessus.
+	if ( 'publish' !== $status && ! wma_can_access_nonpublic() ) {
+		return new WP_Error(
+			'wma_status_forbidden',
+			'Creating non-public content requires the administrator role. Use status "publish" (requires the publish capability) or connect with an administrator account.'
+		);
+	}
+
 	// La publication immédiate exige la capability dédiée au type de contenu
 	// — sauf pour les types non publics : l'accès aux contenus non publics
 	// (déjà exigé) suffit, la capability du type pouvant ne pas être mappée
@@ -2397,7 +2469,7 @@ function wma_exec_create_post( $input = array() ) {
 	if ( 'publish' === $status && ! $publish_ok ) {
 		return new WP_Error(
 			'wma_publish_forbidden',
-			'You do not have the capability to publish directly. Use status "draft" or "pending".'
+			'You do not have the capability to publish directly.'
 		);
 	}
 
@@ -2567,6 +2639,17 @@ function wma_exec_update_post( $input = array() ) {
 	}
 	if ( ! empty( $input['status'] ) ) {
 		$new_status = (string) $input['status'];
+
+		// Garde-fou : basculer vers un statut NON public (draft, pending,
+		// private) exige le rôle admin — sans cela, un compte non admin
+		// pourrait dépublier un contenu sans passer par l'admin.
+		if ( 'publish' !== $new_status && ! wma_can_access_nonpublic() ) {
+			return new WP_Error(
+				'wma_status_forbidden',
+				'Setting a non-public status requires the administrator role.'
+			);
+		}
+
 		if ( 'publish' === $new_status ) {
 			$type_obj = get_post_type_object( $post->post_type );
 
@@ -2580,7 +2663,7 @@ function wma_exec_update_post( $input = array() ) {
 			) {
 				return new WP_Error(
 					'wma_publish_forbidden',
-					'You do not have the capability to publish. Use status "draft", "pending" or "private".'
+				'You do not have the capability to publish.'
 				);
 			}
 		}

@@ -129,9 +129,11 @@ Lectures **status-aware** : un contenu non publié (brouillon, privé, pending) 
 
 **Contenus non publics — réservés au rôle admin (v5.6)** : un contenu non publié (brouillon, privé, pending, programmé…) n'est ni découvrable ni éditable par un autre rôle, quelle que soit sa capability `edit_posts`/`edit_post` :
 
-- lecture : `get-post` refuse tout statut ≠ `publish` ;
+- lecture : `get-post` refuse tout statut ≠ `publish` — avec le **404 générique** (indiscernable d'un contenu inexistant : pas de divulgation d'existence, de statut ni de type ; le slug public est prioritaire sur tout brouillon homonyme) ;
 - listing/recherche : `get-recent-posts` et `search-posts` refusent tout statut ≠ `publish` (`search-posts` accepte désormais le paramètre `post_status` — `publish` par défaut, le comportement public reste identique) ;
-- écriture sur une cible non publiée : `update-post`, `delete-post` et `set-post-terms` sont refusés.
+- écriture sur une cible non publiée : `update-post`, `delete-post` et `set-post-terms` sont refusés ;
+- création non publique : `create-post` refuse les statuts `draft`/`pending`/`private` aux non-admins (sinon ils créeraient des brouillons qu'ils ne pourraient plus relire ni éditer) ;
+- bascule de statut : `update-post` refuse de passer un contenu vers `draft`/`pending`/`private` (un non-admin ne peut pas dépublier via le connecteur).
 
 Pour élargir la liste des rôles autorisés (ex. un rôle technique dédié), filtrer `wma_nonpublic_roles`.
 
@@ -141,7 +143,8 @@ Pour élargir la liste des rôles autorisés (ex. un rôle technique dédié), f
 - lecture : `get-post`, `get-recent-posts` et `search-posts` acceptent ces types (recherche limitée au titre et au contenu du post — pas la méta des plugins) ;
 - écriture : `create-post`, `update-post`, `delete-post` et `set-post-terms` fonctionnent sur ces types ;
 - les enums `type`/`post_type` disparaissent des schémas : le garde-fou d'exécution `wma_post_type_gate()` valide le type demandé (refus explicite pour les comptes non autorisés) ;
-- `attachment` reste réservé aux abilities médias dédiées ; `acf-field` (champ enfant d'un groupe ACF) reste exclu — ajustable via le filtre `wma_nonpublic_post_types`.
+- `attachment` reste réservé aux abilities médias dédiées ; `acf-field` (champ enfant d'un groupe ACF) reste exclu — ajustable via le filtre `wma_nonpublic_post_types` ;
+- tout type **hors liste exposée** — `revision`, `nav_menu_item`, types internes sans interface, ou retiré via les filtres — est refusé par `wma_post_type_gate()` : sans ce garde, leurs contenus (statut `inherit`/`publish`) seraient lisibles et contourneraient tous les garde-fous ; sur `get-post`, même les comptes autorisés reçoivent le 404 générique sur ces types.
 
 ⚠️ Périmètre réel d'édition : un type non public n'a pas toujours les mêmes structures qu'un post classique. Pour Contact Form 7 par exemple, le corps du formulaire (`_form`), les mails et les messages de confirmation vivent en *post meta* : les abilities génériques éditent titre, statut, slug, taxonomies et ACF — pas la méta.
 
@@ -307,7 +310,7 @@ wp-mcp-abilities/
 | **v5.5.1** | `wp-mcp-abilities.php` | **Paramètre `date`** : date de publication sur `create-post` / `update-post` (ISO 8601 ou `YYYY-MM-DD HH:MM:SS` à l'heure du site) — `post_date` + `post_date_gmt`, validée avant écriture, dates du futur refusées ; réponses enrichies (`date`) |
 | **v5.5.2** | `wp-mcp-abilities.php` | Fix critique : guillemets de fermeture restaurés dans les descriptions create/update-post (parse error introduit par v5.5.1) |
 | **v5.6** | `wp-mcp-abilities.php` | **Contenus non publics pour le rôle admin** : `search-posts` accepte `post_status` (défaut `publish`) ; tout statut ≠ `publish` en lecture/recherche et toute cible non publiée en écriture (`update-post`, `delete-post`, `set-post-terms`) exige le rôle admin (filtre `wma_nonpublic_roles`) — les capabilities `edit_posts`/`edit_post` ne suffisent plus pour ces contenus |
-| **v5.6.1** | `wp-mcp-abilities.php` | **Types de contenus non publics, admin-only (ex. formulaires Contact Form 7)** : découverte via `list-post-types` (`"non_public": true`) et lecture/écriture (`get-post`, `get-recent-posts`, `search-posts`, `create/update/delete-post`, `set-post-terms`) réservées aux comptes autorisés aux contenus non publics ; enums `type`/`post_type` remplacées par le garde-fou d'exécution `wma_post_type_gate()` ; `attachment` refusé hors abilities médias (filtre `wma_nonpublic_post_types`) — caveat CF7 : corps du formulaire et réglages en post meta, hors périmètre générique |
+| **v5.6.1** | `wp-mcp-abilities.php` | **Types de contenus non publics, admin-only (ex. formulaires Contact Form 7)** : découverte via `list-post-types` (`"non_public": true`) et lecture/écriture (`get-post`, `get-recent-posts`, `search-posts`, `create/update/delete-post`, `set-post-terms`) réservées aux comptes autorisés aux contenus non publics ; enums `type`/`post_type` remplacées par le garde-fou d'exécution `wma_post_type_gate()` ; `attachment` refusé hors abilities médias (filtre `wma_nonpublic_post_types`) — caveat CF7 : corps du formulaire et réglages en post meta, hors périmètre générique. **Revue sécurité intégrée** : types internes hors liste refusés par le garde (sinon lisibles via `inherit`/`publish`), `get-post` sans divulgation d'existence/statut/type (404 identique, slug public prioritaire), `create-post` refuse les statuts non publics aux non-admins (+ enum `private`), `update-post` refuse la bascule vers un statut non public |
 
 ## Licence
 
