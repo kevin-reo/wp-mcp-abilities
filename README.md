@@ -67,7 +67,7 @@ Préfixe / catégorie neutre : **`site`** — identique sur tous les sites.
 |---|---|---|
 | `site/list-post-types` | lecture | Types de contenus détectés : labels, descriptions, compteurs publiés, taxonomies attachées, inventaire `acf_fields` |
 | `site/get-recent-posts` | lecture | Derniers contenus d'un type (filtre statut, 1–50) |
-| `site/search-posts` | lecture | Recherche plein texte, filtrable par type (`any` par défaut) |
+| `site/search-posts` | lecture | Recherche plein texte, filtrable par type (`any` par défaut) et par statut (`post_status` : publié par défaut, non publics réservés au rôle admin) |
 | `site/get-post` | lecture | Détail d'un contenu par ID ou slug (contenu complet + `fields` ACF si actifs) |
 | `site/get-media` | lecture | Médiathèque : URL, mime, dimensions, alt, légende, taille (pagination) |
 | `site/upload-media` | écriture | Import d'un média : base64 (`data` + `filename`) ou URL distante (`url`, sideload serveur) — respecte les mimes autorisés et la taille max du site |
@@ -103,7 +103,7 @@ Hérités de l'incident v3 (un agent avait supprimé des contenus du mauvais typ
 - `site/delete-term` refuse la suppression d'un terme encore assigné à des contenus (`force=true` pour forcer).
 - `site/delete-media` refuse tout ID qui n'est pas un média (`attachment`) : impossible de supprimer un contenu via l'outil média.
 - Écriture des champs ACF : liste blanche stricte — seuls les champs déclarés pour le type/la taxonomie sont acceptés, validation avant toute écriture.
-- Lectures **status-aware** : un contenu non publié n'est lisible que par qui peut l'éditer ; les statuts ≠ `publish` exigent `edit_posts`.
+- Contenus non publiés **réservés au rôle admin** (filtre `wma_nonpublic_roles`) : lecture (`get-post`), listing (`get-recent-posts`), recherche (`search-posts` via `post_status`) et écriture (`update-post`, `delete-post`, `set-post-terms`) d'une cible non publiée — les capabilities `edit_posts`/`edit_post` d'un éditeur ne suffisent plus via le connecteur.
 - Publication directe refusée sans la capability dédiée au type (`publish_posts`) ; création en `draft` par défaut.
 - `parent_id` uniquement pour les types **hiérarchiques** (parent de même type requis) ; `menu_order` ignoré sur les types non concernés.
 - Les types **sans éditeur** (supports sans `editor`) stockent automatiquement le paramètre `content` dans l'extrait.
@@ -115,17 +115,25 @@ Toutes les abilities exigent un utilisateur **connecté** + la capability adapt�
 
 | Opération | Vérification |
 |---|---|
-| Lecture (posts, types, taxonomies) | `read` |
+| Lecture (posts, types, taxonomies) | `read` ; rôle admin pour les statuts non publiés |
 | Médiathèque (lire / importer) | `upload_files` |
 | Supprimer un média | `delete_post` (sur le média ciblé) |
 | Créer | `edit_posts` + `publish_posts` si `publish` |
-| Mettre à jour | `edit_post` (sur le contenu ciblé) |
-| Supprimer | `delete_post` (sur le contenu ciblé) |
+| Mettre à jour | `edit_post` (sur le contenu ciblé) ; rôle admin pour les statuts non publiés |
+| Supprimer | `delete_post` (sur le contenu ciblé) ; rôle admin pour les statuts non publiés |
 | Termes | capabilities dédiées de la taxonomie : `assign_terms`, `manage_terms`, `edit_terms`, `delete_terms` |
 
 L'exposition MCP (`meta.mcp.public = true`) ne contourne aucune permission : chaque exécution repasse par le `permission_callback`.
 
 Lectures **status-aware** : un contenu non publié (brouillon, privé, pending) n'est lisible que par un compte capable de l'éditer — `get-post` exige `edit_post` sur le contenu ciblé, et `get-recent-posts` exige `edit_posts` pour tout statut ≠ `publish`.
+
+**Contenus non publics — réservés au rôle admin (v5.6)** : un contenu non publié (brouillon, privé, pending, programmé…) n'est ni découvrable ni éditable par un autre rôle, quelle que soit sa capability `edit_posts`/`edit_post` :
+
+- lecture : `get-post` refuse tout statut ≠ `publish` ;
+- listing/recherche : `get-recent-posts` et `search-posts` refusent tout statut ≠ `publish` (`search-posts` accepte désormais le paramètre `post_status` — `publish` par défaut, le comportement public reste identique) ;
+- écriture sur une cible non publiée : `update-post`, `delete-post` et `set-post-terms` sont refusés.
+
+Pour élargir la liste des rôles autorisés (ex. un rôle technique dédié), filtrer `wma_nonpublic_roles`.
 
 Import média par URL : schémas http(s) uniquement, hôte **public** requis (plages privées/boucle locale/réservées refusées avant tout téléchargement) — désactivable via le filtre `wma_allow_url_sideload`. La garde couvre une résolution DNS (pas le DNS rebinding) : pour un cloisonnement strict, désactiver le sideload.
 
@@ -144,6 +152,7 @@ Sans toucher au fichier, un petit snippet `mu-plugin` peut ajuster un site parti
 | `wma_taxonomies` | Restreindre/étendre les taxonomies exposées | toutes les taxonomies publiques avec UI |
 | `wma_types_description` | Remplacer le texte de contexte des agents | auto-généré depuis labels + descriptions |
 | `wma_allow_url_sideload` | Désactiver l'import média par URL distante (anti-SSRF strict) | `true` |
+| `wma_nonpublic_roles` | Rôles autorisés à consulter et éditer les contenus non publiés via le connecteur | `administrator` |
 
 ```php
 // Ex. masquer le type « post » sur un site de documentation :
@@ -269,7 +278,7 @@ Contrôle indépendant du client avec curl (attendu : `200`) : `curl -u "identif
 wp-mcp-abilities/
 ├── .gitignore                 ← exclut les références locales
 ├── README.md                 ← ce fichier
-└── wp-mcp-abilities.php      ← connecteur générique v5.5 (à déployer)
+└── wp-mcp-abilities.php      ← connecteur générique v5.6 (à déployer)
 ```
 
 ## Historique
@@ -285,6 +294,8 @@ wp-mcp-abilities/
 | **v5.4.1** | `wp-mcp-abilities.php` | **Fix kses conditionnel** : `wp_kses_post()` n'est plus appliqué aux contenus (`create-post` / `update-post`) ni aux descriptions de termes (`create-term` / `update-term`) des comptes disposant de `unfiltered_html` (comportement du cœur) — un admin écrivant via MCP ne perd plus le markup hors liste blanche kses (SVG inline des blocs `wp:html`, iframes…) |
 | **v5.5.0** | `wp-mcp-abilities.php` | **Support Polylang (optionnel)** : `lang` (code langue, validé contre `pll_languages_list()` avant écriture) et `translations` (groupe complet langue => ID) sur `create-post` / `update-post`, via `pll_set_post_language()` et `pll_save_post_translations()` ; réponses enrichies (`lang`, `translations`) |
 | **v5.5.1** | `wp-mcp-abilities.php` | **Paramètre `date`** : date de publication sur `create-post` / `update-post` (ISO 8601 ou `YYYY-MM-DD HH:MM:SS` à l'heure du site) — `post_date` + `post_date_gmt`, validée avant écriture, dates du futur refusées ; réponses enrichies (`date`) |
+| **v5.5.2** | `wp-mcp-abilities.php` | Fix critique : guillemets de fermeture restaurés dans les descriptions create/update-post (parse error introduit par v5.5.1) |
+| **v5.6** | `wp-mcp-abilities.php` | **Contenus non publics pour le rôle admin** : `search-posts` accepte `post_status` (défaut `publish`) ; tout statut ≠ `publish` en lecture/recherche et toute cible non publiée en écriture (`update-post`, `delete-post`, `set-post-terms`) exige le rôle admin (filtre `wma_nonpublic_roles`) — les capabilities `edit_posts`/`edit_post` ne suffisent plus pour ces contenus |
 
 ## Licence
 

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.5.2
+ * Version:     5.6
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -60,6 +60,8 @@
  *  - wma_taxonomies         → liste des taxonomies autorisées.
  *  - wma_types_description  → texte de contexte pour les agents.
  *  - wma_allow_url_sideload → autoriser (défaut) ou refuser l'import média par URL distante.
+ *  - wma_nonpublic_roles    → rôles autorisés à consulter et éditer les contenus
+ *                             non publiés via le connecteur (défaut : « administrator »).
  *
  * CHAMPS PERSONNALISÉS (ACF) — support conditionnel (rien si ACF est inactif) :
  *  - lecture  : site/get-post renvoie « fields » (valeurs ACF du contenu) ;
@@ -83,9 +85,11 @@
  *  - site/delete-media refuse tout ID qui n'est pas un média (« attachment ») ;
  *  - écriture des champs ACF limitée aux champs déclarés pour le type/la
  *    taxonomie (liste blanche stricte) ;
- *  - lectures status-aware : un contenu non publié n'est lisible que par qui
- *    peut l'éditer (get-post), et les statuts ≠ « publish » exigent edit_posts
- *    (get-recent-posts) ;
+ *  - contenus non publiés réservés au rôle admin (filtre wma_nonpublic_roles) :
+ *    statuts ≠ « publish » (draft, pending, private, future…) refusés sur
+ *    get-post, get-recent-posts et search-posts (sauf paramètre post_status
+ *    explicite), et sur l'édition (update-post, delete-post, set-post-terms)
+ *    d'une cible non publiée ;
  *  - upload-media en mode URL : schémas http(s) uniquement, hôte public requis
  *    (plages privées/réservées refusées avant téléchargement), désactivable via
  *    wma_allow_url_sideload ;
@@ -133,6 +137,14 @@
  *                  (« unexpected identifier "category" » à la ligne 1058 : parse
  *                  error sur tout le site au chargement du mu-plugin). Restaurés
  *                  et vérifiés par parseur PHP.
+ *  - v5.6        : contenus non publiés réservés au rôle admin — search-posts
+ *                  accepte désormais « post_status » (défaut « publish » : le
+ *                  comportement public est inchangé) et les statuts non publics
+ *                  (draft, pending, private, any) exigent le rôle admin sur
+ *                  search-posts, get-recent-posts, get-post, update-post,
+ *                  delete-post et set-post-terms (les capacités edit_posts /
+ *                  edit_post ne suffisent plus), filtre wma_nonpublic_roles pour
+ *                  élargir la liste des rôles autorisés.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -140,7 +152,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.5.2' );
+define( 'WMA_VERSION', '5.6' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -293,6 +305,47 @@ function wma_format_post( WP_Post $post ): array {
 		'link'       => (string) get_permalink( $post ),
 		'edit_url'   => current_user_can( 'edit_post', $post->ID ) ? (string) get_edit_post_link( $post, 'raw' ) : '',
 	);
+}
+
+/**
+ * Le statut d'un contenu le rend-il « non public » ? (≠ publish/inherit)
+ *
+ * Statuts publics : « publish » et « inherit » (médias, révisions). Tout autre
+ * statut — draft, pending, private, future, auto-draft, trash, statut custom —
+ * est considéré non public (sécurité : mieux vaut interdire que fuir un
+ * brouillon). Les post inexistants (null) sont ignorés : les callbacks amont
+ * refusent déjà les IDs inconnus.
+ *
+ * @param int|WP_Post|null $post ID du contenu ou objet WP_Post.
+ * @return bool
+ */
+function wma_is_nonpublic_post( $post ): bool {
+	$p      = ( $post instanceof WP_Post ) ? $post : get_post( $post );
+	$status = $p ? (string) $p->post_status : '';
+	$public = array( 'publish', 'inherit' );
+
+	return '' !== $status && ! in_array( $status, $public, true );
+}
+
+/**
+ * L'utilisateur courant peut-il consulter et éditer les contenus non publics ?
+ *
+ * Réservé au rôle « administrator » : via le connecteur, l'accès aux contenus
+ * non publiés (lecture, recherche, édition) ne dépend plus des capacités
+ * edit_posts/edit_post, mais du rôle admin uniquement. Étensible via le filtre
+ * wma_nonpublic_roles (liste de rôles autorisés).
+ *
+ * @return bool
+ */
+function wma_can_access_nonpublic(): bool {
+	$user = wp_get_current_user();
+	if ( ! $user->ID ) {
+		return false;
+	}
+
+	$roles = (array) apply_filters( 'wma_nonpublic_roles', array( 'administrator' ) );
+
+	return (bool) array_intersect( $roles, (array) $user->roles );
 }
 
 /**
@@ -921,7 +974,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/get-recent-posts',
 		array(
 			'label'               => 'Get Recent Posts',
-			'description'         => 'Retrieve the most recent content of a given type, newest first. Each result carries "type" and "type_label" identifying its content type. Unpublished statuses (draft, private, any) require the edit_posts capability. ' . wma_types_description(),
+			'description'         => 'Retrieve the most recent content of a given type, newest first. Each result carries "type" and "type_label" identifying its content type. Non-public statuses (draft, private, any) require the administrator role. ' . wma_types_description(),
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -941,9 +994,9 @@ add_action( 'wp_abilities_api_init', static function () {
 					),
 					'post_status' => array(
 						'type'        => 'string',
-						'enum'        => array( 'publish', 'draft', 'private', 'any' ),
+						'enum'        => array( 'publish', 'draft', 'pending', 'private', 'any' ),
 						'default'     => 'publish',
-						'description' => 'Status filter (default "publish"). Unpublished statuses require the edit_posts capability.',
+						'description' => 'Status filter (default "publish"). Non-public statuses (draft, pending, private, any) require the administrator role.',
 					),
 				),
 			),
@@ -972,7 +1025,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/search-posts',
 		array(
 			'label'               => 'Search Posts',
-			'description'         => 'Full-text search across published content. WARNING: results may mix several content types — each result carries "type" and "type_label", ALWAYS check them before any action. Restrict the search with the post_type parameter when the user mentions a specific kind of content. ' . wma_types_description(),
+			'description'         => 'Full-text search across content. Default: published only. Pass "post_status" ("draft", "pending", "private" or "any") to include non-public content — reserved for the administrator role, refused otherwise. WARNING: results may mix several content types — each result carries "type" and "type_label", ALWAYS check them before any action. Restrict the search with the post_type parameter when the user mentions a specific kind of content. ' . wma_types_description(),
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -987,6 +1040,12 @@ add_action( 'wp_abilities_api_init', static function () {
 						'enum'        => array_merge( $post_types, array( 'any' ) ),
 						'default'     => 'any',
 						'description' => 'Restrict search to one content type ("any" = all types, default). STRONGLY recommended to narrow down before destructive actions. ' . wma_types_description(),
+					),
+					'post_status' => array(
+						'type'        => 'string',
+						'enum'        => array( 'publish', 'draft', 'pending', 'private', 'any' ),
+						'default'     => 'publish',
+						'description' => 'Status filter (default "publish"). Non-public statuses (draft, pending, private, any) require the administrator role.',
 					),
 					'limit'     => array(
 						'type'        => 'integer',
@@ -1023,7 +1082,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/get-post',
 		array(
 			'label'               => 'Get Post',
-			'description'         => 'Retrieve a single content item with its full content, by numeric ID or slug. The result carries "type" and "type_label" identifying its content type — check them before updating or deleting. When ACF is active, the result also carries a "fields" object with the custom field values of the content. Unpublished content (draft, private…) is only readable with edit permission on it.',
+			'description'         => 'Retrieve a single content item with its full content, by numeric ID or slug. The result carries "type" and "type_label" identifying its content type — check them before updating or deleting. When ACF is active, the result also carries a "fields" object with the custom field values of the content. Non-public content (draft, private…) is only readable by the administrator role.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1163,7 +1222,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/update-post',
 		array(
 			'label'               => 'Update Post',
-			'description'         => 'Update an existing content item. Provide the post ID and at least one field to change (title, content, status, slug, excerpt, parent_id, menu_order). Optional "post_type" acts as a safety check: if provided and different from the actual content type of the post, the update is REFUSED. Note: types without an editor store the "content" parameter in the excerpt instead. Optional "fields" object updates ACF custom fields — only fields declared for the type are accepted; requires ACF. Optional "lang" changes the Polylang language (e.g. "en") and "translations" replaces the Polylang translation group as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it. Optional "date" sets/changes the publish date (ISO 8601 or "YYYY-MM-DD HH:MM:SS", site timezone; future dates refused).',
+			'description'         => 'Update an existing content item. Provide the post ID and at least one field to change (title, content, status, slug, excerpt, parent_id, menu_order). Optional "post_type" acts as a safety check: if provided and different from the actual content type of the post, the update is REFUSED. Note: types without an editor store the "content" parameter in the excerpt instead. Optional "fields" object updates ACF custom fields — only fields declared for the type are accepted; requires ACF. Optional "lang" changes the Polylang language (e.g. "en") and "translations" replaces the Polylang translation group as a language => post ID map, completed with this content under its own language — both require Polylang and are ignored without it. Optional "date" sets/changes the publish date (ISO 8601 or "YYYY-MM-DD HH:MM:SS", site timezone; future dates refused). Non-public targets (draft, pending, private…) require the administrator role.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1273,7 +1332,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/delete-post',
 		array(
 			'label'               => 'Delete Post',
-			'description'         => 'Delete content by ID. SAFEGUARD: the "post_type" parameter is REQUIRED and must match the actual content type of the post — the deletion is REFUSED if it does not (prevents deleting one kind of content when the user asked to delete another). Verify the ID and its type first via search-posts or get-post. Default moves to trash (recoverable); force=true permanently deletes. ' . wma_types_description(),
+			'description'         => 'Delete content by ID. SAFEGUARD: the "post_type" parameter is REQUIRED and must match the actual content type of the post — the deletion is REFUSED if it does not (prevents deleting one kind of content when the user asked to delete another). Verify the ID and its type first via search-posts or get-post. Default moves to trash (recoverable); force=true permanently deletes. Non-public targets (draft, pending, private…) require the administrator role. ' . wma_types_description(),
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1652,7 +1711,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/set-post-terms',
 		array(
 			'label'               => 'Set Post Terms',
-			'description'         => 'Assign terms to a content item for a given taxonomy (e.g. set categories). Provide term_ids or term_names (missing names are created). By default terms are appended; set append=false to replace all existing terms.',
+			'description'         => 'Assign terms to a content item for a given taxonomy (e.g. set categories). Provide term_ids or term_names (missing names are created). By default terms are appended; set append=false to replace all existing terms. Non-public targets (draft, pending, private…) require the administrator role.',
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1969,11 +2028,11 @@ function wma_exec_list_post_types( $input = array() ): array {
 function wma_exec_get_recent_posts( $input = array() ) {
 	$post_status = $input['post_status'] ?? 'publish';
 
-	// Garde-fou : les statuts autres que « publish » exigent edit_posts.
-	if ( 'publish' !== $post_status && ! current_user_can( 'edit_posts' ) ) {
+	// Garde-fou : les statuts autres que « publish » exigent le rôle admin.
+	if ( 'publish' !== $post_status && ! wma_can_access_nonpublic() ) {
 		return new WP_Error(
 			'wma_status_forbidden',
-			'Listing unpublished content requires the edit_posts capability.'
+			'Listing non-public content requires the administrator role.'
 		);
 	}
 
@@ -1996,16 +2055,29 @@ function wma_exec_get_recent_posts( $input = array() ) {
 /**
  * site/search-posts — recherche plein texte, filtrable par type.
  *
- * @param array $input {query, post_type?, limit?}.
- * @return array
+ * S'étend aux contenus non publiés via « post_status » — réservé au rôle admin
+ * (wma_can_access_nonpublic), refusé pour les autres rôles.
+ *
+ * @param array $input {query, post_type?, post_status?, limit?}.
+ * @return array|WP_Error
  */
-function wma_exec_search_posts( $input = array() ): array {
+function wma_exec_search_posts( $input = array() ) {
+	$post_status = $input['post_status'] ?? 'publish';
+
+	// Garde-fou : les statuts autres que « publish » exigent le rôle admin.
+	if ( 'publish' !== $post_status && ! wma_can_access_nonpublic() ) {
+		return new WP_Error(
+			'wma_status_forbidden',
+			'Searching non-public content requires the administrator role.'
+		);
+	}
+
 	$posts = get_posts(
 		array(
 			's'           => (string) ( $input['query'] ?? '' ),
 			'numberposts' => min( 50, max( 1, (int) ( $input['limit'] ?? 10 ) ) ),
 			'post_type'   => $input['post_type'] ?? 'any',
-			'post_status' => 'publish',
+			'post_status' => $post_status,
 			'orderby'     => 'relevance',
 		)
 	);
@@ -2046,11 +2118,11 @@ function wma_exec_get_post( $input = array() ) {
 		);
 	}
 
-	// Garde-fou : un contenu non publié n'est lisible que par qui peut l'éditer.
-	if ( 'publish' !== $post->post_status && ! current_user_can( 'edit_post', $post->ID ) ) {
+	// Garde-fou : un contenu non publié n'est lisible que par le rôle admin.
+	if ( wma_is_nonpublic_post( $post ) && ! wma_can_access_nonpublic() ) {
 		return new WP_Error(
 			'wma_post_forbidden',
-			'You are not allowed to read unpublished content (status: ' . $post->post_status . ').'
+			'Reading non-public content (status: ' . $post->post_status . ') requires the administrator role.'
 		);
 	}
 
@@ -2207,6 +2279,14 @@ function wma_exec_update_post( $input = array() ) {
 		return new WP_Error(
 			'wma_post_not_found',
 			"Post {$post_id} not found."
+		);
+	}
+
+	// Garde-fou : l'édition d'un contenu non publié exige le rôle admin.
+	if ( wma_is_nonpublic_post( $post ) && ! wma_can_access_nonpublic() ) {
+		return new WP_Error(
+			'wma_post_forbidden',
+			'Updating non-public content (status: ' . $post->post_status . ') requires the administrator role.'
 		);
 	}
 
@@ -2375,6 +2455,14 @@ function wma_exec_delete_post( $input = array() ) {
 		return new WP_Error(
 			'wma_post_not_found',
 			"Post {$post_id} not found."
+		);
+	}
+
+	// Garde-fou : la suppression d'un contenu non publié exige le rôle admin.
+	if ( wma_is_nonpublic_post( $post ) && ! wma_can_access_nonpublic() ) {
+		return new WP_Error(
+			'wma_post_forbidden',
+			'Deleting non-public content (status: ' . $post->post_status . ') requires the administrator role.'
 		);
 	}
 
@@ -2835,6 +2923,14 @@ function wma_exec_set_post_terms( $input = array() ) {
 		return new WP_Error(
 			'wma_post_not_found',
 			"Post {$post_id} not found."
+		);
+	}
+
+	// Garde-fou : la modification des termes d'un contenu non publié exige le rôle admin.
+	if ( wma_is_nonpublic_post( $post ) && ! wma_can_access_nonpublic() ) {
+		return new WP_Error(
+			'wma_post_forbidden',
+			'Assigning terms to non-public content (status: ' . $post->post_status . ') requires the administrator role.'
 		);
 	}
 
