@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.6.2
+ * Version:     5.7
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -16,7 +16,7 @@
  * Catégorie / préfixe des abilities : « site » — neutre, identique sur tous
  * les sites (renommable via le filtre wma_category en cas de collision).
  *
- * Abilities exposées (16) :
+ * Abilities exposées (18) :
  *  - site/list-post-types   (lecture)  Types de contenus détectés (types publics +, pour les comptes autorisés, types non publics « non_public ») : labels, descriptions (ACF), compteurs, taxonomies, champs ACF (inventaire).
  *  - site/get-recent-posts  (lecture)  Derniers contenus (inclut type + type_label).
  *  - site/search-posts      (lecture)  Recherche plein texte (multi-types, filtrable par type).
@@ -30,6 +30,8 @@
  *  - site/update-post       (écriture) Mise à jour (vérification optionnelle du type).
  *  - site/delete-post       (écriture) Suppression — post_type REQUIS (garde-fou anti-confusion).
  *  - site/set-post-terms    (écriture) Assignation de termes à un contenu.
+ *  - site/get-post-meta      (lecture)  Post meta brute d'un contenu (admin) — réglages de plugins (CF7…).
+ *  - site/update-post-meta   (écriture) Création/remplacement/suppression de post meta (admin).
  *  - site/create-term       (écriture) Création d'un terme (name, slug, description, parent).
  *  - site/update-term       (écriture) Mise à jour d'un terme (taxonomie vérifiée).
  *  - site/delete-term       (écriture) Suppression d'un terme — refusée si encore assigné (garde-fou).
@@ -71,6 +73,9 @@
  *  - wma_nonpublic_post_types → types de contenus NON publics (formulaires,
  *                             CPT internes) listés par list-post-types et
  *                             éditables, en complément des types publics.
+ *  - wma_protected_post_meta_keys → clés de post meta interdites via
+ *                             site/update-post-meta (défaut : comptabilité
+ *                             interne du cœur).
  *
  * CHAMPS PERSONNALISÉS (ACF) — support conditionnel (rien si ACF est inactif) :
  *  - lecture  : site/get-post renvoie « fields » (valeurs ACF du contenu) ;
@@ -110,6 +115,9 @@
  *    « revision », « nav_menu_item »… — sinon lisibles via leur statut
  *    inherit/publish : contournement interdit) et « attachment » reste
  *    réservé aux abilities médias dédiées ;
+ *  - post meta brute (v5.7 : get/update-post-meta) réservée aux comptes
+ *    autorisés aux contenus non publics ; clés internes du cœur refusées
+ *    (filtre wma_protected_post_meta_keys) ;
  *  - upload-media en mode URL : schémas http(s) uniquement, hôte public requis
  *    (plages privées/réservées refusées avant téléchargement), désactivable via
  *    wma_allow_url_sideload ;
@@ -200,6 +208,14 @@
  *                  flamingo_contact/inbound (messages reçus des
  *                  formulaires) deviennent donc lisibles par l'admin via le
  *                  connecteur ; ajustable via wma_nonpublic_post_types.
+ *  - v5.7        : + site/get-post-meta et site/update-post-meta — lecture et
+ *                  écriture de post meta brute (réglages de plugins stockés
+ *                  en méta : messages de confirmation CF7 « _messages »,
+ *                  réglages mails « _mail »…), réservées aux comptes
+ *                  autorisés aux contenus non publics (filtre
+ *                  wma_nonpublic_roles) ; clés internes du cœur refusées
+ *                  (filtre wma_protected_post_meta_keys), valeur null =
+ *                  suppression de la clé.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -207,7 +223,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.6.2' );
+define( 'WMA_VERSION', '5.7' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -2038,6 +2054,97 @@ add_action( 'wp_abilities_api_init', static function () {
 		)
 	);
 
+	/* ---------- Ability : site/get-post-meta (lecture, admin) ---------- */
+
+	wp_register_ability(
+		$prefix . '/get-post-meta',
+		array(
+			'label'               => 'Get Post Meta',
+			'description'         => 'Read the raw post meta (custom fields) of a content item, plugin settings included — e.g. Contact Form 7 confirmation texts ("_messages") and mail settings ("_mail"). ADMIN ONLY: the account must be allowed to access non-public content (administrator role by default, wma_nonpublic_roles filter). Optional "keys" array restricts the output to specific meta keys. Values are returned exactly as stored (arrays are decoded).',
+			'category'            => $prefix,
+			'input_schema'        => array(
+				'type'       => 'object',
+				'properties' => array(
+					'post_id' => array(
+						'type'        => 'integer',
+						'description' => 'ID of the post.',
+					),
+					'keys'    => array(
+						'type'        => 'array',
+						'items'       => array( 'type' => 'string' ),
+						'description' => 'Optional list of meta keys to fetch (default: all keys).',
+					),
+				),
+				'required'   => array( 'post_id' ),
+			),
+			'output_schema'       => array(
+				'type'       => 'object',
+				'properties' => array(
+					'post_id' => array( 'type' => 'integer' ),
+					'meta'    => array(
+						'type'        => 'object',
+						'description' => 'Meta values keyed by meta key, exactly as stored.',
+					),
+					'count'   => array( 'type' => 'integer' ),
+				),
+				'required'   => array( 'post_id', 'meta', 'count' ),
+			),
+			'permission_callback' => static function ( $input = array() ) {
+				return is_user_logged_in() && wma_can_access_nonpublic();
+			},
+			'execute_callback'    => 'wma_exec_get_post_meta',
+			'meta'                => $meta_public( true ),
+		)
+	);
+
+	/* ---------- Ability : site/update-post-meta (écriture, admin) ---------- */
+
+	wp_register_ability(
+		$prefix . '/update-post-meta',
+		array(
+			'label'               => 'Update Post Meta',
+			'description'         => 'Create or replace raw post meta (custom fields) on a content item, plugin settings included — e.g. Contact Form 7 confirmation texts ("_messages") or mail settings ("_mail"). ADMIN ONLY: the account must be allowed to access non-public content (administrator role by default, wma_nonpublic_roles filter). Provide "meta" as an object of meta_key => value: each key is written with update_post_meta (a previous value is replaced); a null value DELETES the key. Core bookkeeping keys are refused (edit locks, trash metadata — filter wma_protected_post_meta_keys). Read the current values first via ' . $prefix . '/get-post-meta and write back the complete object (e.g. the whole "_messages" map) to avoid losing sibling keys.',
+			'category'            => $prefix,
+			'input_schema'        => array(
+				'type'       => 'object',
+				'properties' => array(
+					'post_id' => array(
+						'type'        => 'integer',
+						'description' => 'ID of the post.',
+					),
+					'meta'    => array(
+						'type'                 => 'object',
+						'additionalProperties' => true,
+						'minProperties'         => 1,
+						'description'          => 'Object of meta_key => value. Each key is created or replaced; a null value deletes the key.',
+					),
+				),
+				'required'   => array( 'post_id', 'meta' ),
+			),
+			'output_schema'       => array(
+				'type'       => 'object',
+				'properties' => array(
+					'success' => array( 'type' => 'boolean' ),
+					'post_id' => array( 'type' => 'integer' ),
+					'applied' => array(
+						'type'  => 'array',
+						'items' => array( 'type' => 'string' ),
+					),
+					'refused' => array(
+						'type'  => 'array',
+						'items' => array( 'type' => 'string' ),
+					),
+				),
+				'required'   => array( 'success', 'post_id', 'applied' ),
+			),
+			'permission_callback' => static function ( $input = array() ) {
+				return is_user_logged_in() && wma_can_access_nonpublic();
+			},
+			'execute_callback'    => 'wma_exec_update_post_meta',
+			'meta'                => $meta_public( false ),
+		)
+	);
+
 	/* ---------- Ability : site/create-term (écriture) ---------- */
 
 	wp_register_ability(
@@ -3364,6 +3471,139 @@ function wma_exec_set_post_terms( $input = array() ) {
 			$taxonomy,
 			$append ? ' (appended)' : ' (replaced)'
 		),
+	);
+}
+
+/**
+ * Clés de post meta protégées : jamais modifiables via le connecteur
+ * (comptabilité interne du cœur). Étensible via le filtre
+ * wma_protected_post_meta_keys (ajout OU retrait selon le site).
+ *
+ * @return string[]
+ */
+function wma_protected_post_meta_keys(): array {
+	$keys = array(
+		'_edit_lock',           // Verrou d'édition de l'admin.
+		'_edit_last',           // Dernier éditeur.
+		'_wp_old_slug',         // Historique de slugs (redirections).
+		'_wp_old_date',         // Historique de dates.
+		'_wp_trash_meta_time',   // Métadonnées de corbeille.
+		'_wp_trash_meta_status',
+	);
+
+	return (array) apply_filters( 'wma_protected_post_meta_keys', $keys );
+}
+
+/**
+ * site/get-post-meta — lit la post meta brute d'un contenu (admin).
+ *
+ * @param array $input {post_id, keys?}.
+ * @return array|WP_Error
+ */
+function wma_exec_get_post_meta( $input = array() ) {
+	$post_id = absint( $input['post_id'] ?? 0 );
+	$post    = get_post( $post_id );
+
+	if ( ! $post ) {
+		return new WP_Error(
+			'wma_post_not_found',
+			'Post not found: provide a valid "post_id".'
+		);
+	}
+
+	// Garde-fou : type exposé par le connecteur (mêmes règles que get-post).
+	$type_gate = wma_post_type_gate( $post->post_type );
+	if ( is_wp_error( $type_gate ) ) {
+		return $type_gate;
+	}
+
+	$all  = get_post_meta( $post_id, '', false ); // Clé => tableau de valeurs.
+	$only = isset( $input['keys'] ) ? array_map( 'strval', (array) $input['keys'] ) : null;
+	$meta = array();
+
+	foreach ( $all as $key => $values ) {
+		if ( is_array( $only ) && ! in_array( $key, $only, true ) ) {
+			continue;
+		}
+		$meta[ $key ] = ( is_array( $values ) && 1 === count( $values ) ) ? $values[0] : $values;
+	}
+
+	return array(
+		'post_id' => $post_id,
+		'meta'    => $meta,
+		'count'   => count( $meta ),
+	);
+}
+
+/**
+ * site/update-post-meta — crée ou remplace de la post meta (admin).
+ *
+ * Une valeur null supprime la clé ; les clés internes du cœur sont
+ * refusées (wma_protected_post_meta_keys). Lire d'abord via
+ * site/get-post-meta et réécrire l'objet COMPLET (ex. tout « _messages »)
+ * pour ne pas perdre les clés voisines.
+ *
+ * @param array $input {post_id, meta}.
+ * @return array|WP_Error
+ */
+function wma_exec_update_post_meta( $input = array() ) {
+	$post_id = absint( $input['post_id'] ?? 0 );
+	$post    = get_post( $post_id );
+
+	if ( ! $post ) {
+		return new WP_Error(
+			'wma_post_not_found',
+			'Post not found: provide a valid "post_id".'
+		);
+	}
+
+	// Garde-fou : type exposé par le connecteur (mêmes règles que les
+	// autres abilities d'écriture).
+	$type_gate = wma_post_type_gate( $post->post_type );
+	if ( is_wp_error( $type_gate ) ) {
+		return $type_gate;
+	}
+
+	$meta = (array) ( $input['meta'] ?? array() );
+	if ( empty( $meta ) ) {
+		return new WP_Error(
+			'wma_nothing_to_update',
+			'Nothing to update: provide at least one meta key.'
+		);
+	}
+
+	$protected = wma_protected_post_meta_keys();
+	$applied   = array();
+	$refused   = array();
+
+	foreach ( $meta as $raw_key => $value ) {
+		$key = trim( (string) $raw_key );
+
+		if ( '' === $key ) {
+			$refused[] = '(empty meta key)';
+			continue;
+		}
+
+		if ( in_array( $key, $protected, true ) ) {
+			$refused[] = $key . ' (protected core key)';
+			continue;
+		}
+
+		if ( null === $value ) {
+			delete_post_meta( $post_id, $key );
+			$applied[] = $key . ' (deleted)';
+			continue;
+		}
+
+		update_post_meta( $post_id, $key, $value );
+		$applied[] = $key;
+	}
+
+	return array(
+		'success' => true,
+		'post_id' => $post_id,
+		'applied' => $applied,
+		'refused' => $refused,
 	);
 }
 
