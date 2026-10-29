@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.7
+ * Version:     5.7.1
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -216,6 +216,11 @@
  *                  wma_nonpublic_roles) ; clés internes du cœur refusées
  *                  (filtre wma_protected_post_meta_keys), valeur null =
  *                  suppression de la clé.
+ *  - v5.7.1      : fix get-post-meta — get_post_meta( $id, '', false ) rend
+ *                  les valeurs brutes : la méta structurée (tableaux
+ *                  sérialisés : CF7 « _messages », « _mail »…) est désormais
+ *                  désérialisée explicitement (maybe_unserialize) — elle
+ *                  arrivait sous forme de chaîne sérialisée.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -223,7 +228,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.7' );
+define( 'WMA_VERSION', '5.7.1' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -3525,7 +3530,15 @@ function wma_exec_get_post_meta( $input = array() ) {
 		if ( is_array( $only ) && ! in_array( $key, $only, true ) ) {
 			continue;
 		}
-		$meta[ $key ] = ( is_array( $values ) && 1 === count( $values ) ) ? $values[0] : $values;
+
+		// get_post_meta( $id, '', false ) rend les valeurs BRUTES : la méta
+		// structurée (tableaux sérialisés — CF7 « _messages », « _mail »…)
+		// doit être désérialisée explicitement.
+		if ( is_array( $values ) && 1 === count( $values ) ) {
+			$meta[ $key ] = maybe_unserialize( $values[0] );
+		} else {
+			$meta[ $key ] = array_map( 'maybe_unserialize', (array) $values );
+		}
 	}
 
 	return array(

@@ -298,7 +298,7 @@ Contrôle indépendant du client avec curl (attendu : `200`) : `curl -u "identif
 wp-mcp-abilities/
 ├── .gitignore                 ← exclut les références locales
 ├── README.md                 ← ce fichier
-└── wp-mcp-abilities.php      ← connecteur générique v5.7 (à déployer)
+└── wp-mcp-abilities.php      ← connecteur générique v5.7.1 (à déployer)
 ```
 
 ## Historique
