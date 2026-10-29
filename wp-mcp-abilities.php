@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.6
+ * Version:     5.6.1
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -17,7 +17,7 @@
  * les sites (renommable via le filtre wma_category en cas de collision).
  *
  * Abilities exposées (16) :
- *  - site/list-post-types   (lecture)  Types de contenus détectés : labels, descriptions (ACF), compteurs, taxonomies, champs ACF (inventaire).
+ *  - site/list-post-types   (lecture)  Types de contenus détectés (types publics +, pour les comptes autorisés, types non publics « non_public ») : labels, descriptions (ACF), compteurs, taxonomies, champs ACF (inventaire).
  *  - site/get-recent-posts  (lecture)  Derniers contenus (inclut type + type_label).
  *  - site/search-posts      (lecture)  Recherche plein texte (multi-types, filtrable par type).
  *  - site/get-post          (lecture)  Détail d'un contenu par ID ou slug (+ champs ACF si actifs).
@@ -45,7 +45,13 @@
  * DÉCOUVERTE AUTOMATIQUE — aucun réglage par site :
  *  - types de contenus : tous les post types publics avec interface
  *                         (« attachment » exclu) — un CPT ajouté via ACF est
- *                         immédiatement exposé aux agents IA ;
+ *                         immédiatement exposé aux agents IA ; et, depuis la
+ *                         v5.6.1, les types NON publics avec interface
+ *                         (formulaires de plugins, CPT internes) sont listés
+ *                         par site/list-post-types — uniquement pour les
+ *                         comptes autorisés aux contenus non publics
+ *                         (« non_public » => true, filtre
+ *                         wma_nonpublic_post_types) ;
  *  - taxonomies        : toutes les taxonomies publiques avec interface —
  *                         tous les termes sont donc listables ;
  *  - descriptions      : la description de chaque post type (définie dans
@@ -62,6 +68,9 @@
  *  - wma_allow_url_sideload → autoriser (défaut) ou refuser l'import média par URL distante.
  *  - wma_nonpublic_roles    → rôles autorisés à consulter et éditer les contenus
  *                             non publiés via le connecteur (défaut : « administrator »).
+ *  - wma_nonpublic_post_types → types de contenus NON publics (formulaires,
+ *                             CPT internes) listés par list-post-types et
+ *                             éditables, en complément des types publics.
  *
  * CHAMPS PERSONNALISÉS (ACF) — support conditionnel (rien si ACF est inactif) :
  *  - lecture  : site/get-post renvoie « fields » (valeurs ACF du contenu) ;
@@ -90,6 +99,11 @@
  *    get-post, get-recent-posts et search-posts (sauf paramètre post_status
  *    explicite), et sur l'édition (update-post, delete-post, set-post-terms)
  *    d'une cible non publiée ;
+ *  - types de contenus non publics (v5.6.1 : formulaires de plugins, CPT
+ *    internes…) invisibles par défaut — la découverte (list-post-types,
+ *    « non_public » => true) et l'édition (create/update/delete-post,
+ *    set-post-terms) exigent l'accès aux contenus non publics ; le type
+ *    « attachment » reste réservé aux abilities médias dédiées ;
  *  - upload-media en mode URL : schémas http(s) uniquement, hôte public requis
  *    (plages privées/réservées refusées avant téléchargement), désactivable via
  *    wma_allow_url_sideload ;
@@ -145,6 +159,19 @@
  *                  delete-post et set-post-terms (les capacités edit_posts /
  *                  edit_post ne suffisent plus), filtre wma_nonpublic_roles pour
  *                  élargir la liste des rôles autorisés.
+ *  - v5.6.1      : découverte et édition des TYPES de contenus non publics
+ *                  (ex. « wpcf7_contact_form » des formulaires Contact Form 7)
+ *                  — eux aussi réservés aux comptes autorisés aux contenus non
+ *                  publics (rôle admin par défaut, même filtre
+ *                  wma_nonpublic_roles) : site/list-post-types les liste avec
+ *                  « non_public » => true ; les paramètres type/post_type des
+ *                  abilities de contenu n'ont plus d'enum (le garde-fou
+ *                  wma_post_type_gate valide le type à l'exécution) —
+ *                  « attachment » refusé hors abilities médias, « acf-field »
+ *                  exclu ; filtre wma_nonpublic_post_types. NOTE : pour les
+ *                  formulaires CF7, le corps du formulaire et les réglages
+ *                  (mails, messages) vivent en post méta et restent hors du
+ *                  périmètre des abilities génériques.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -152,7 +179,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.6' );
+define( 'WMA_VERSION', '5.6.1' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -237,7 +264,7 @@ function wma_types_description(): string {
 
 	return (string) apply_filters(
 		'wma_types_description',
-		'Content types on this site: ' . implode( '; ', $parts ) . '. Each type is distinct: always check the "type" and "type_label" fields of a result before any create, update or delete action.'
+		'Content types on this site: ' . implode( '; ', $parts ) . '. Each type is distinct: always check the "type" and "type_label" fields of a result before any create, update or delete action. Non-public content types (plugin forms, internal CPTs) are NOT in this list: they are discoverable and manageable only by accounts allowed to access non-public content (administrator role by default — list them via ' . wma_category() . '/list-post-types, flagged "non_public": true).'
 	);
 }
 
@@ -346,6 +373,153 @@ function wma_can_access_nonpublic(): bool {
 	$roles = (array) apply_filters( 'wma_nonpublic_roles', array( 'administrator' ) );
 
 	return (bool) array_intersect( $roles, (array) $user->roles );
+}
+
+/**
+ * Types de contenus NON publics avec interface (ex. « wpcf7_contact_form »
+ * des formulaires Contact Form 7) : INVISIBLES par défaut — leur découverte
+ * (site/list-post-types) et leur manipulation (abilities de contenu) exigent
+ * de pouvoir accéder aux contenus non publics (wma_can_access_nonpublic :
+ * rôle admin par défaut, filtre wma_nonpublic_roles).
+ *
+ * « attachment » exclu (médias gérés par les abilities dédiées) et
+ * « acf-field » exclu (champ enfant d'un groupe ACF, réservé à ACF).
+ * Étensible via le filtre wma_nonpublic_post_types.
+ *
+ * @return string[]
+ */
+function wma_nonpublic_post_types(): array {
+	$types = get_post_types( array( 'public' => false, 'show_ui' => true ), 'names' );
+
+	unset( $types['attachment'], $types['acf-field'] );
+
+	return apply_filters( 'wma_nonpublic_post_types', array_values( $types ) );
+}
+
+/**
+ * Un TYPE de contenu est-il non public ? (opposé de la propriété « public »
+ * du post type — distinct du statut d'un contenu, cf. wma_is_nonpublic_post).
+ *
+ * @param string $post_type Slug du type de contenu.
+ * @return bool
+ */
+function wma_is_nonpublic_post_type( string $post_type ): bool {
+	$type_obj = get_post_type_object( $post_type );
+
+	return (bool) ( $type_obj && ! $type_obj->public );
+}
+
+/**
+ * Types de contenus manipulables par l'utilisateur courant : types publics
+ * pour tous, + types non publics pour qui peut consulter les contenus non
+ * publics. Utilisée par les garde-fous d'exécution — JAMAIS dans les
+ * schémas, qui restent identiques pour tous les rôles.
+ *
+ * @return string[]
+ */
+function wma_allowed_post_types(): array {
+	$types = wma_post_types();
+
+	if ( wma_can_access_nonpublic() ) {
+		$types = array_merge( $types, wma_nonpublic_post_types() );
+	}
+
+	return array_values( array_unique( $types ) );
+}
+
+/**
+ * Garde-fou d'exécution sur le TYPE de contenu demandé :
+ *  - type public (ou type par défaut) : OK, comportement inchangé ;
+ *  - type non public : refusé si le compte ne peut pas consulter les
+ *    contenus non publics (rôle admin par défaut, filtre
+ *    wma_nonpublic_roles) ;
+ *  - « attachment » : refusé — les médias passent par les abilities dédiées.
+ *
+ * @param string $post_type Slug du type de contenu demandé.
+ * @return true|WP_Error
+ */
+function wma_post_type_gate( string $post_type ) {
+	if ( '' === $post_type || in_array( $post_type, wma_post_types(), true ) ) {
+		return true; // Type public (ou type par défaut) : inchangé.
+	}
+
+	if ( 'attachment' === $post_type ) {
+		return new WP_Error(
+			'wma_post_type_forbidden',
+			'Media are managed by the dedicated media abilities, not by the content abilities.'
+		);
+	}
+
+	// Type inconnu ou simplement non listé hors administration : ce n'est pas
+	// le rôle de ce garde-fou — l'exécution renvoie son erreur dédiée.
+	if ( ! post_type_exists( $post_type ) || ! in_array( $post_type, wma_nonpublic_post_types(), true ) ) {
+		return true;
+	}
+
+	if ( ! wma_can_access_nonpublic() ) {
+		return new WP_Error(
+			'wma_post_type_forbidden',
+			sprintf(
+				'Content type "%1$s" is not public on this site: it is only discoverable and editable by accounts allowed to access non-public content (the administrator role by default, or the roles listed by the wma_nonpublic_roles filter).',
+				$post_type
+			)
+		);
+	}
+
+	return true;
+}
+
+/**
+ * Permission update-post : cible existante, type de contenu autorisé (non
+ * public = accès aux contenus non publics requis, indépendamment des
+ * capacities potentiellement non mappées sur ce type) et capacité d'édition
+ * du contenu.
+ *
+ * @param WP_Post $post Cible de la mise à jour.
+ * @return bool
+ */
+function wma_update_permission_check( WP_Post $post ): bool {
+	// Types de contenus non publics : accès aux contenus non publics requis.
+	if ( wma_is_nonpublic_post_type( $post->post_type ) ) {
+		return wma_can_access_nonpublic();
+	}
+
+	return current_user_can( 'edit_post', $post->ID );
+}
+
+/**
+ * Permission delete-post : mêmes règles que la mise à jour, capacité de
+ * suppression pour les types publics.
+ *
+ * @param WP_Post $post Cible de la suppression.
+ * @return bool
+ */
+function wma_delete_permission_check( WP_Post $post ): bool {
+	// Types de contenus non publics : accès aux contenus non publics requis.
+	if ( wma_is_nonpublic_post_type( $post->post_type ) ) {
+		return wma_can_access_nonpublic();
+	}
+
+	return current_user_can( 'delete_post', $post->ID );
+}
+
+/**
+ * Permission set-post-terms : type de contenu autorisé et capacité
+ * d'assignation de la taxonomie.
+ *
+ * @param WP_Post       $post    Cible de l'assignation.
+ * @param WP_Taxonomy   $tax_obj Taxonomie visée.
+ * @return bool
+ */
+function wma_set_terms_permission_check( WP_Post $post, $tax_obj ): bool {
+	// Types de contenus non publics : accès aux contenus non publics requis.
+	if ( wma_is_nonpublic_post_type( $post->post_type ) ) {
+		return wma_can_access_nonpublic()
+			&& current_user_can( $tax_obj->cap->assign_terms );
+	}
+
+	return current_user_can( 'edit_post', $post->ID )
+		&& current_user_can( $tax_obj->cap->assign_terms );
 }
 
 /**
@@ -890,7 +1064,6 @@ add_action( 'wp_abilities_api_categories_init', static function () {
 add_action( 'wp_abilities_api_init', static function () {
 
 	$prefix        = wma_category();
-	$post_types    = wma_post_types();
 	$taxonomies    = wma_taxonomies();
 	$default       = wma_default_post_type();
 	$hier_note     = wma_hierarchical_note();
@@ -916,7 +1089,7 @@ add_action( 'wp_abilities_api_init', static function () {
 		$prefix . '/list-post-types',
 		array(
 			'label'               => 'List Post Types',
-			'description'         => 'List the content types of the site with their labels, descriptions, published counts, attached taxonomies and ACF field inventory ("acf_fields": name, label, type, required — when ACF is active). Use this FIRST to understand the content types and their custom fields before searching, creating, updating or deleting content. ' . wma_types_description(),
+			'description'         => 'List the content types of the site with their labels, descriptions, published counts, attached taxonomies and ACF field inventory ("acf_fields": name, label, type, required — when ACF is active). Use this FIRST to understand the content types and their custom fields before searching, creating, updating or deleting content. Accounts allowed to access non-public content (administrator role by default) additionally receive the non-public content types, flagged "non_public": true, and can manage them with the same tools. ' . wma_types_description(),
 			'category'            => $prefix,
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -954,6 +1127,10 @@ add_action( 'wp_abilities_api_init', static function () {
 									),
 								),
 							),
+							'non_public'   => array(
+								'type'        => 'boolean',
+								'description' => 'true = non-public content type (discovered and manageable only by accounts with non-public content access).',
+								),
 							'required'   => array( 'name', 'label' ),
 						),
 					),
@@ -988,9 +1165,8 @@ add_action( 'wp_abilities_api_init', static function () {
 					),
 					'post_type'   => array(
 						'type'        => 'string',
-						'enum'        => $post_types,
 						'default'     => $default,
-						'description' => 'Content type to query (default "' . $default . '"). ' . wma_types_description(),
+						'description' => 'Content type to query (default "' . $default . '"). Public types below; accounts with non-public content access (administrator role by default) may also query the non-public types flagged "non_public" by ' . $prefix . '/list-post-types. ' . wma_types_description(),
 					),
 					'post_status' => array(
 						'type'        => 'string',
@@ -1037,9 +1213,8 @@ add_action( 'wp_abilities_api_init', static function () {
 					),
 					'post_type' => array(
 						'type'        => 'string',
-						'enum'        => array_merge( $post_types, array( 'any' ) ),
 						'default'     => 'any',
-						'description' => 'Restrict search to one content type ("any" = all types, default). STRONGLY recommended to narrow down before destructive actions. ' . wma_types_description(),
+						'description' => 'Restrict search to one content type ("any" = public types, default). Public types below; accounts with non-public content access (administrator role by default) may also target the non-public types flagged "non_public" by ' . $prefix . '/list-post-types. Note: search only indexes the post title and content, not the plugin meta. STRONGLY recommended to narrow down before destructive actions. ' . wma_types_description(),
 					),
 					'post_status' => array(
 						'type'        => 'string',
@@ -1140,9 +1315,8 @@ add_action( 'wp_abilities_api_init', static function () {
 					),
 					'type'      => array(
 						'type'        => 'string',
-						'enum'        => $post_types,
 						'default'     => $default,
-						'description' => 'Content type (default "' . $default . '"). ' . wma_types_description(),
+						'description' => 'Content type (default "' . $default . '"). Public types below; accounts with non-public content access (administrator role by default) may also create non-public content, via the types flagged "non_public" by ' . $prefix . '/list-post-types. ' . wma_types_description(),
 					),
 					'slug'      => array(
 						'type'        => 'string',
@@ -1209,7 +1383,20 @@ add_action( 'wp_abilities_api_init', static function () {
 				'required'   => array( 'success', 'id' ),
 			),
 			'permission_callback' => static function ( $input = array() ) {
-				return is_user_logged_in() && current_user_can( 'edit_posts' );
+				if ( ! is_user_logged_in() ) {
+					return false;
+				}
+
+				$type = (string) ( $input['type'] ?? wma_default_post_type() );
+
+				// Types de contenus non publics : exigent l'accès aux contenus
+				// non publics (rôle admin par défaut, filtre
+				// wma_nonpublic_roles).
+				if ( wma_is_nonpublic_post_type( $type ) ) {
+					return wma_can_access_nonpublic();
+				}
+
+				return current_user_can( 'edit_posts' );
 			},
 			'execute_callback'    => 'wma_exec_create_post',
 			'meta'                => $meta_public( false ),
@@ -1233,8 +1420,7 @@ add_action( 'wp_abilities_api_init', static function () {
 					),
 					'post_type' => array(
 						'type'        => 'string',
-						'enum'        => $post_types,
-						'description' => 'Optional safety check: expected content type of the post. If it does not match, the update is refused. ' . wma_types_description(),
+						'description' => 'Optional safety check: expected content type of the post. If it does not match, the update is refused. Accounts with non-public content access (administrator role by default) may also target the non-public types flagged "non_public" by ' . $prefix . '/list-post-types. ' . wma_types_description(),
 					),
 					'title'     => array(
 						'type'        => 'string',
@@ -1319,7 +1505,7 @@ add_action( 'wp_abilities_api_init', static function () {
 					return false;
 				}
 				$post = get_post( absint( $input['post_id'] ?? 0 ) );
-				return $post ? current_user_can( 'edit_post', $post->ID ) : false;
+				return $post ? wma_update_permission_check( $post ) : false;
 			},
 			'execute_callback'    => 'wma_exec_update_post',
 			'meta'                => $meta_public( false ),
@@ -1343,8 +1529,7 @@ add_action( 'wp_abilities_api_init', static function () {
 					),
 					'post_type' => array(
 						'type'        => 'string',
-						'enum'        => $post_types,
-						'description' => 'REQUIRED: the content type you intend to delete. Must match the actual type of the post. ' . wma_types_description(),
+						'description' => 'REQUIRED: the content type you intend to delete. Must match the actual type of the post. Accounts with non-public content access (administrator role by default) may also delete the non-public types flagged "non_public" by ' . $prefix . '/list-post-types. ' . wma_types_description(),
 					),
 					'force'    => array(
 						'type'        => 'boolean',
@@ -1376,7 +1561,7 @@ add_action( 'wp_abilities_api_init', static function () {
 					return false;
 				}
 				$post = get_post( absint( $input['post_id'] ?? 0 ) );
-				return $post ? current_user_can( 'delete_post', $post->ID ) : false;
+				return $post ? wma_delete_permission_check( $post ) : false;
 			},
 			'execute_callback'    => 'wma_exec_delete_post',
 			'meta'                => $meta_public( false ),
@@ -1770,8 +1955,9 @@ add_action( 'wp_abilities_api_init', static function () {
 				if ( ! $tax_obj ) {
 					return false;
 				}
-				return current_user_can( 'edit_post', $post_id )
-					&& current_user_can( $tax_obj->cap->assign_terms );
+				$post = get_post( $post_id );
+
+				return $post ? wma_set_terms_permission_check( $post, $tax_obj ) : false;
 			},
 			'execute_callback'    => 'wma_exec_set_post_terms',
 			'meta'                => $meta_public( false ),
@@ -1995,7 +2181,17 @@ add_action( 'wp_abilities_api_init', static function () {
 function wma_exec_list_post_types( $input = array() ): array {
 	$out = array();
 
-	foreach ( wma_post_types() as $post_type_slug ) {
+	// Les types non publics (formulaires, CPT internes de plugins) ne
+	// rejoignent le listing que pour les comptes autorisés à consulter les
+	// contenus non publics (rôle admin par défaut, filtre
+	// wma_nonpublic_roles).
+	$listing_types = wma_post_types();
+
+	if ( wma_can_access_nonpublic() ) {
+		$listing_types = array_merge( $listing_types, wma_nonpublic_post_types() );
+	}
+
+	foreach ( $listing_types as $post_type_slug ) {
 		$obj = get_post_type_object( $post_type_slug );
 		if ( ! $obj ) {
 			continue;
@@ -2013,6 +2209,7 @@ function wma_exec_list_post_types( $input = array() ): array {
 			'published'    => isset( $counts->publish ) ? (int) $counts->publish : 0,
 			'taxonomies'   => array_values( array_intersect( wma_taxonomies(), $taxonomy ) ),
 			'acf_fields'   => wma_acf_field_list( 'post_type', $post_type_slug ),
+			'non_public'   => wma_is_nonpublic_post_type( $post_type_slug ),
 		);
 	}
 
@@ -2036,10 +2233,19 @@ function wma_exec_get_recent_posts( $input = array() ) {
 		);
 	}
 
+	// Garde-fou : les types non publics exigent l'accès aux contenus non
+	// publics (rôle admin par défaut, filtre wma_nonpublic_roles).
+	$post_type = (string) ( $input['post_type'] ?? wma_default_post_type() );
+
+	$type_gate = wma_post_type_gate( $post_type );
+	if ( is_wp_error( $type_gate ) ) {
+		return $type_gate;
+	}
+
 	$posts = get_posts(
 		array(
 			'numberposts' => min( 50, max( 1, (int) ( $input['numberposts'] ?? 10 ) ) ),
-			'post_type'   => $input['post_type'] ?? wma_default_post_type(),
+			'post_type'   => $post_type,
 			'post_status' => $post_status,
 			'orderby'     => 'date',
 			'order'       => 'DESC',
@@ -2072,11 +2278,22 @@ function wma_exec_search_posts( $input = array() ) {
 		);
 	}
 
+	// Garde-fou : les types non publics exigent l'accès aux contenus non
+	// publics (rôle admin par défaut, filtre wma_nonpublic_roles).
+	$post_type = (string) ( $input['post_type'] ?? 'any' );
+
+	if ( 'any' !== $post_type ) {
+		$type_gate = wma_post_type_gate( $post_type );
+		if ( is_wp_error( $type_gate ) ) {
+			return $type_gate;
+		}
+	}
+
 	$posts = get_posts(
 		array(
 			's'           => (string) ( $input['query'] ?? '' ),
 			'numberposts' => min( 50, max( 1, (int) ( $input['limit'] ?? 10 ) ) ),
-			'post_type'   => $input['post_type'] ?? 'any',
+			'post_type'   => $post_type,
 			'post_status' => $post_status,
 			'orderby'     => 'relevance',
 		)
@@ -2103,7 +2320,7 @@ function wma_exec_get_post( $input = array() ) {
 		$found = get_posts(
 			array(
 				'name'        => sanitize_title( (string) $input['slug'] ),
-				'post_type'   => 'any',
+				'post_type'   => wma_can_access_nonpublic() ? wma_allowed_post_types() : 'any',
 				'post_status' => array( 'publish', 'draft', 'private', 'pending' ),
 				'numberposts' => 1,
 			)
@@ -2116,6 +2333,13 @@ function wma_exec_get_post( $input = array() ) {
 			'wma_post_not_found',
 			'Post not found: provide a valid "post_id" or "slug".'
 		);
+	}
+
+	// Garde-fou : les types de contenus non publics ne sont lisibles que
+	// par les comptes autorisés à consulter les contenus non publics.
+	$type_gate = wma_post_type_gate( $post->post_type );
+	if ( is_wp_error( $type_gate ) ) {
+		return $type_gate;
 	}
 
 	// Garde-fou : un contenu non publié n'est lisible que par le rôle admin.
@@ -2151,12 +2375,26 @@ function wma_exec_create_post( $input = array() ) {
 	if ( ! $type_obj ) {
 		return new WP_Error(
 			'wma_invalid_post_type',
-			'Unknown post type. Allowed: ' . implode( ', ', wma_post_types() )
+			'Unknown post type. Allowed: ' . implode( ', ', wma_allowed_post_types() )
 		);
 	}
 
-	// La publication immédiate exige la capability dédiée au type de contenu.
-	if ( 'publish' === $status && ! current_user_can( $type_obj->cap->publish_posts ) ) {
+	// Garde-fou : les types non publics exigent l'accès aux contenus non
+	// publics (rôle admin par défaut, filtre wma_nonpublic_roles).
+	$type_gate = wma_post_type_gate( $type );
+	if ( is_wp_error( $type_gate ) ) {
+		return $type_gate;
+	}
+
+	// La publication immédiate exige la capability dédiée au type de contenu
+	// — sauf pour les types non publics : l'accès aux contenus non publics
+	// (déjà exigé) suffit, la capability du type pouvant ne pas être mappée
+	// sur le compte (ex. formulaires de plugins).
+	$publish_ok = wma_is_nonpublic_post_type( $type )
+		? wma_can_access_nonpublic()
+		: current_user_can( $type_obj->cap->publish_posts );
+
+	if ( 'publish' === $status && ! $publish_ok ) {
 		return new WP_Error(
 			'wma_publish_forbidden',
 			'You do not have the capability to publish directly. Use status "draft" or "pending".'
@@ -2282,6 +2520,13 @@ function wma_exec_update_post( $input = array() ) {
 		);
 	}
 
+	// Garde-fou : les types de contenus non publics exigent l'accès aux
+	// contenus non publics.
+	$type_gate = wma_post_type_gate( $post->post_type );
+	if ( is_wp_error( $type_gate ) ) {
+		return $type_gate;
+	}
+
 	// Garde-fou : l'édition d'un contenu non publié exige le rôle admin.
 	if ( wma_is_nonpublic_post( $post ) && ! wma_can_access_nonpublic() ) {
 		return new WP_Error(
@@ -2324,7 +2569,15 @@ function wma_exec_update_post( $input = array() ) {
 		$new_status = (string) $input['status'];
 		if ( 'publish' === $new_status ) {
 			$type_obj = get_post_type_object( $post->post_type );
-			if ( ! $type_obj || ! current_user_can( $type_obj->cap->publish_posts ) ) {
+
+			// Publication : capability du type de contenu — sauf pour les types
+			// non publics, où l'accès aux contenus non publics suffit
+			// (capability du type potentiellement non mappée, ex. plugins).
+			if (
+				! $type_obj
+				|| ! ( current_user_can( $type_obj->cap->publish_posts )
+					|| ( wma_is_nonpublic_post_type( $post->post_type ) && wma_can_access_nonpublic() ) )
+			) {
 				return new WP_Error(
 					'wma_publish_forbidden',
 					'You do not have the capability to publish. Use status "draft", "pending" or "private".'
@@ -2456,6 +2709,13 @@ function wma_exec_delete_post( $input = array() ) {
 			'wma_post_not_found',
 			"Post {$post_id} not found."
 		);
+	}
+
+	// Garde-fou : les types de contenus non publics exigent l'accès aux
+	// contenus non publics.
+	$type_gate = wma_post_type_gate( $post->post_type );
+	if ( is_wp_error( $type_gate ) ) {
+		return $type_gate;
 	}
 
 	// Garde-fou : la suppression d'un contenu non publié exige le rôle admin.
@@ -2924,6 +3184,13 @@ function wma_exec_set_post_terms( $input = array() ) {
 			'wma_post_not_found',
 			"Post {$post_id} not found."
 		);
+	}
+
+	// Garde-fou : les types de contenus non publics exigent l'accès aux
+	// contenus non publics.
+	$type_gate = wma_post_type_gate( $post->post_type );
+	if ( is_wp_error( $type_gate ) ) {
+		return $type_gate;
 	}
 
 	// Garde-fou : la modification des termes d'un contenu non publié exige le rôle admin.
