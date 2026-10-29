@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP Abilities
  * Description: Connecteur MCP générique pour sites WordPress (ACF). Expose des tools WordPress (Abilities API) via MCP (plugin mcp-adapter) pour les agents IA (n8n, Claude, cptr, etc.). Un seul fichier, identique sur tous les sites : les types de contenus, taxonomies et descriptions sont découverts dynamiquement — aucune configuration par site.
- * Version:     5.6.1
+ * Version:     5.6.2
  * Author:      krikrak
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -188,6 +188,18 @@
  *                  non-admins (+ enum « private ») et update-post la bascule
  *                  vers un statut non public (un éditeur ne peut plus
  *                  dépublier via le connecteur).
+ *  - v5.6.2      : fix détection des types non publics — « show_ui » seul
+ *                  était trop étroit : Contact Form 7 enregistre
+ *                  « wpcf7_contact_form » SANS show_ui ni show_in_menu
+ *                  (interface d'admin maison) et restait invisible. Tout
+ *                  type non public est désormais exposé aux comptes
+ *                  autorisés, SAUF liste d'exclusion explicite de types
+ *                  techniques (revision, nav_menu*, custom_css,
+ *                  customize_changeset, oembed_cache, user_request, FSE :
+ *                  wp_template*, wp_global_styles, wp_font*, acf-field) —
+ *                  flamingo_contact/inbound (messages reçus des
+ *                  formulaires) deviennent donc lisibles par l'admin via le
+ *                  connecteur ; ajustable via wma_nonpublic_post_types.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -195,7 +207,7 @@ defined( 'ABSPATH' ) || exit;
 if ( defined( 'WMA_VERSION' ) ) {
 	return; // Déjà chargé : une seconde copie de ce fichier s'arrête ici.
 }
-define( 'WMA_VERSION', '5.6.1' );
+define( 'WMA_VERSION', '5.6.2' );
 
 /* -------------------------------------------------------------------------
  * Découverte automatique
@@ -401,24 +413,50 @@ function wma_can_access_nonpublic(): bool {
 }
 
 /**
- * Types de contenus NON publics avec interface (ex. « wpcf7_contact_form »
+ * Types de contenus NON publics administrables (ex. « wpcf7_contact_form »
  * des formulaires Contact Form 7) : INVISIBLES par défaut — leur découverte
  * (site/list-post-types) et leur manipulation (abilities de contenu) exigent
  * de pouvoir accéder aux contenus non publics (wma_can_access_nonpublic :
  * rôle admin par défaut, filtre wma_nonpublic_roles).
  *
- * « attachment » exclu (médias gérés par les abilities dédiées) et
- * « acf-field » exclu (champ enfant d'un groupe ACF, réservé à ACF).
- * Étensible via le filtre wma_nonpublic_post_types.
+ * Détection (v5.6.2) : tout type non public est exposé, SAUF une liste
+ * d'exclusion explicite de types techniques du cœur (révisions, menus,
+ * customizer, FSE, RGPD…) — le filtre « show_ui » seul était trop étroit :
+ * Contact Form 7 enregistre son type SANS show_ui ni show_in_menu (il
+ * construit son interface d'admin maison) et restait donc invisible.
+ * « attachment » exclu (médias : abilities dédiées) et « acf-field » exclu
+ * (champ enfant d'un groupe ACF, réservé à ACF).
+ * Étensible via le filtre wma_nonpublic_post_types (retrait OU ajout —
+ * ex. exposer « wp_template » ou masquer « flamingo_inbound »).
  *
  * @return string[]
  */
 function wma_nonpublic_post_types(): array {
-	$types = get_post_types( array( 'public' => false, 'show_ui' => true ), 'names' );
+	$types = get_post_types( array( 'public' => false ), 'names' );
 
-	unset( $types['attachment'], $types['acf-field'] );
+	// Types techniques du cœur et internes d'outils : jamais exposés via
+	// les abilities génériques (révisions = contenu des brouillons, RGPD =
+	// données personnelles, FSE = éditeur de site, etc.).
+	$excluded = array(
+		'attachment',          // Médias — abilities dédiées (get/upload/delete-media).
+		'revision',            // Révisions — contiennent le contenu des brouillons.
+		'nav_menu',            // Menus (objets internes).
+		'nav_menu_item',       // Éléments de menus (structure interne).
+		'custom_css',          // CSS additionnel du customizer (enregistrement singleton).
+		'customize_changeset', // Brouillons du customizer.
+		'oembed_cache',        // Cache oEmbed.
+		'user_request',        // Demandes RGPD (données personnelles).
+		'wp_template',         // Templates FSE — éditeur de site.
+		'wp_template_part',    // Parties de template FSE.
+		'wp_global_styles',    // Styles globaux FSE.
+		'wp_font_family',      // Polices FSE.
+		'wp_font_face',        // Polices FSE (variantes).
+		'acf-field',           // Champs enfants d'un groupe ACF — réservé à ACF.
+	);
 
-	return apply_filters( 'wma_nonpublic_post_types', array_values( $types ) );
+	$types = array_values( array_diff( $types, $excluded ) );
+
+	return apply_filters( 'wma_nonpublic_post_types', $types );
 }
 
 /**

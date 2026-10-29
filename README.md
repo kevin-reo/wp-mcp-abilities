@@ -144,7 +144,8 @@ Pour élargir la liste des rôles autorisés (ex. un rôle technique dédié), f
 - écriture : `create-post`, `update-post`, `delete-post` et `set-post-terms` fonctionnent sur ces types ;
 - les enums `type`/`post_type` disparaissent des schémas : le garde-fou d'exécution `wma_post_type_gate()` valide le type demandé (refus explicite pour les comptes non autorisés) ;
 - `attachment` reste réservé aux abilities médias dédiées ; `acf-field` (champ enfant d'un groupe ACF) reste exclu — ajustable via le filtre `wma_nonpublic_post_types` ;
-- tout type **hors liste exposée** — `revision`, `nav_menu_item`, types internes sans interface, ou retiré via les filtres — est refusé par `wma_post_type_gate()` : sans ce garde, leurs contenus (statut `inherit`/`publish`) seraient lisibles et contourneraient tous les garde-fous ; sur `get-post`, même les comptes autorisés reçoivent le 404 générique sur ces types.
+- tout type **hors liste exposée** — `revision`, `nav_menu_item`, types internes sans interface, ou retiré via les filtres — est refusé par `wma_post_type_gate()` : sans ce garde, leurs contenus (statut `inherit`/`publish`) seraient lisibles et contourneraient tous les garde-fous ; sur `get-post`, même les comptes autorisés reçoivent le 404 générique sur ces types ;
+- détection **v5.6.2** : tout type non public est exposé (aux comptes autorisés) sauf types techniques explicitement exclus (révisions, menus, customizer, FSE, RGPD, `acf-field`…) — le filtre `show_ui` seul était trop étroit : Contact Form 7 (type **sans** `show_ui`, interface d'admin maison) et Flamingo (`flamingo_inbound` = messages reçus des formulaires) sont donc couverts ; filtre `wma_nonpublic_post_types` pour retirer ou ajouter.
 
 ⚠️ Périmètre réel d'édition : un type non public n'a pas toujours les mêmes structures qu'un post classique. Pour Contact Form 7 par exemple, le corps du formulaire (`_form`), les mails et les messages de confirmation vivent en *post meta* : les abilities génériques éditent titre, statut, slug, taxonomies et ACF — pas la méta.
 
@@ -292,7 +293,7 @@ Contrôle indépendant du client avec curl (attendu : `200`) : `curl -u "identif
 wp-mcp-abilities/
 ├── .gitignore                 ← exclut les références locales
 ├── README.md                 ← ce fichier
-└── wp-mcp-abilities.php      ← connecteur générique v5.6.1 (à déployer)
+└── wp-mcp-abilities.php      ← connecteur générique v5.6.2 (à déployer)
 ```
 
 ## Historique
@@ -311,6 +312,7 @@ wp-mcp-abilities/
 | **v5.5.2** | `wp-mcp-abilities.php` | Fix critique : guillemets de fermeture restaurés dans les descriptions create/update-post (parse error introduit par v5.5.1) |
 | **v5.6** | `wp-mcp-abilities.php` | **Contenus non publics pour le rôle admin** : `search-posts` accepte `post_status` (défaut `publish`) ; tout statut ≠ `publish` en lecture/recherche et toute cible non publiée en écriture (`update-post`, `delete-post`, `set-post-terms`) exige le rôle admin (filtre `wma_nonpublic_roles`) — les capabilities `edit_posts`/`edit_post` ne suffisent plus pour ces contenus |
 | **v5.6.1** | `wp-mcp-abilities.php` | **Types de contenus non publics, admin-only (ex. formulaires Contact Form 7)** : découverte via `list-post-types` (`"non_public": true`) et lecture/écriture (`get-post`, `get-recent-posts`, `search-posts`, `create/update/delete-post`, `set-post-terms`) réservées aux comptes autorisés aux contenus non publics ; enums `type`/`post_type` remplacées par le garde-fou d'exécution `wma_post_type_gate()` ; `attachment` refusé hors abilities médias (filtre `wma_nonpublic_post_types`) — caveat CF7 : corps du formulaire et réglages en post meta, hors périmètre générique. **Revue sécurité intégrée** : types internes hors liste refusés par le garde (sinon lisibles via `inherit`/`publish`), `get-post` sans divulgation d'existence/statut/type (404 identique, slug public prioritaire), `create-post` refuse les statuts non publics aux non-admins (+ enum `private`), `update-post` refuse la bascule vers un statut non public |
+| **v5.6.2** | `wp-mcp-abilities.php` | **Fix détection des types non publics** : « show_ui » seul était trop étroit — CF7 enregistre son type sans `show_ui` ni `show_in_menu` et restait invisible. Tout type non public est exposé aux comptes autorisés SAUF exclusion explicite des types techniques (révisions, menus, `custom_css`, customizer, FSE, RGPD, `acf-field`) ; `wpcf7_contact_form` **et** `flamingo_contact`/`flamingo_inbound` (messages reçus) deviennent lisibles/éditables par l'admin via le connecteur (filtre `wma_nonpublic_post_types` pour ajuster) |
 
 ## Licence
 
